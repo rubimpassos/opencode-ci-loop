@@ -56,6 +56,9 @@ export class DashboardServer {
   }
 
   private route(request: Request): Response {
+    if (!isAllowedHost(request.headers.get("host"), this.config.port)) {
+      return new Response("forbidden", { status: 403 })
+    }
     const path = new URL(request.url).pathname
     switch (path) {
       case "/":
@@ -95,4 +98,11 @@ export class DashboardServer {
 
 function encodeEvent(snapshot: readonly SessionState[]): Uint8Array {
   return new TextEncoder().encode(`data: ${JSON.stringify(snapshot)}\n\n`)
+}
+
+/** Barra DNS rebinding: só aceita requests endereçados ao próprio loopback. */
+export function isAllowedHost(hostHeader: string | null, port: number): boolean {
+  if (hostHeader === null) return false
+  const allowed = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`]
+  return allowed.includes(hostHeader.toLowerCase())
 }
