@@ -50,6 +50,16 @@ export class WatchRegistry {
     }))
   }
 
+  /** Leitura pura: NÃO cria a sessão (ao contrário de `session`/`isEnabled`); default `autoWatch` se nunca vista. */
+  sessionView(sessionID: SessionId): SessionState {
+    const existing = this.sessions.get(sessionID)
+    return {
+      sessionID,
+      enabled: existing?.enabled ?? this.config.autoWatch,
+      watch: existing?.watch ?? null,
+    }
+  }
+
   isEnabled(sessionID: SessionId): boolean {
     return this.session(sessionID).enabled
   }

@@ -31,6 +31,14 @@ export const CiLoopPlugin: Plugin = async ({ client, directory }, options) => {
     },
   })
 
+  dashboard.setControl({
+    getSession: (id) => registry.sessionView(id as SessionId),
+    setEnabled: (id, enabled) => {
+      registry.setEnabled(id as SessionId, enabled)
+      return registry.sessionView(id as SessionId)
+    },
+  })
+
   async function notifyPhase(sessionID: SessionId, watch: Watch): Promise<void> {
     const phase = watch.phase
     const fingerprint = phase.kind === "running" ? `running:${summarizeRuns(phase.runs)}` : phase.kind

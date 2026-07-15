@@ -66,6 +66,20 @@ Ou com opções:
 
 Abra `http://127.0.0.1:4517` no painel **browser/preview** do OpenChamber para ter o painel de CI ao vivo do lado do chat — status por workflow, spinner durante execução e logs de falha expansíveis.
 
+A aba **PR** da área de git do OpenChamber também integra com o plugin: toggle "Monitor de CI" por sessão + badge de status ao vivo (o servidor do OpenChamber proxeia para o dashboard; porta configurável via `OPENCHAMBER_CI_LOOP_PORT`).
+
+### HTTP API do dashboard
+
+Todas as rotas exigem `Host` de loopback (barreira contra DNS rebinding).
+
+| Rota | Método | Descrição |
+|---|---|---|
+| `/` | GET | Página do painel |
+| `/state` | GET | Snapshot `SessionState[]` |
+| `/events` | GET | SSE com snapshots ao vivo |
+| `/sessions/:id` | GET | Estado de uma sessão (leitura pura; sessões nunca vistas herdam o default `autoWatch`) |
+| `/sessions/:id/enabled` | POST | Liga/desliga o loop da sessão — body `{ "enabled": boolean }`, retorna o `SessionState` novo |
+
 ## Desenvolvimento
 
 ```bash

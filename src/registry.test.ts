@@ -78,6 +78,27 @@ describe("WatchRegistry", () => {
     expect(registry.isEnabled(SESSION)).toBe(false)
   })
 
+  it("sessionView returns autoWatch default without creating the session", () => {
+    const changes: number[] = []
+    const registry = new WatchRegistry(fakeGh([[]]), testConfig(), {
+      onChange: (sessions) => changes.push(sessions.length),
+      onPhase: async () => {},
+    })
+
+    const view = registry.sessionView(SESSION)
+    expect(view).toEqual({ sessionID: SESSION, enabled: true, watch: null })
+    expect(registry.snapshot()).toHaveLength(0)
+    expect(changes).toHaveLength(0)
+  })
+
+  it("sessionView reflects a persisted per-session toggle", () => {
+    const { events } = collectPhases()
+    const registry = new WatchRegistry(fakeGh([[]]), testConfig(), events, instantSleep)
+
+    registry.setEnabled(SESSION, false)
+    expect(registry.sessionView(SESSION).enabled).toBe(false)
+  })
+
   it("disabling a session aborts its active watch", async () => {
     const runningForever = fakeGh([[makeRun("in_progress", null)]])
     const { phases, events } = collectPhases()
