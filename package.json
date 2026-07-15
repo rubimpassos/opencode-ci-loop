@@ -1,0 +1,29 @@
+{
+  "name": "opencode-ci-loop",
+  "version": "0.1.0",
+  "description": "opencode plugin: CI validation loop — watches GitHub Actions after a push, injects results into the session, with per-session toggle and a live SSE dashboard",
+  "module": "index.ts",
+  "main": "index.ts",
+  "type": "module",
+  "license": "MIT",
+  "repository": "github:rubimpassos/opencode-ci-loop",
+  "files": ["index.ts", "src", "!src/**/*.test.ts"],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "test": "bun test",
+    "check": "bun run typecheck && bun run lint && bun test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.4",
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.0.0"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.18.1"
+  }
+}
