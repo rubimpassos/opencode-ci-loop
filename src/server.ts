@@ -16,12 +16,17 @@ const EnabledBodySchema = z.object({ enabled: z.boolean() })
 
 const SESSION_PATH = /^\/sessions\/([^/]+?)(\/enabled)?$/
 
+const BIND_RETRY_MS = 15_000
+
 /** Mini servidor HTTP+SSE do dashboard. Broadcast de snapshots pros clientes conectados. */
 export class DashboardServer {
   private readonly clients = new Set<SseClient>()
   private server: ReturnType<typeof Bun.serve> | null = null
   private lastSnapshot: readonly SessionState[] = []
   private control: SessionControl | null = null
+  private retryTimer: ReturnType<typeof setTimeout> | null = null
+  private stopped = false
+  private warnedBindFailure = false
 
   constructor(private readonly config: PluginConfig["dashboard"]) {}
 
@@ -33,13 +38,34 @@ export class DashboardServer {
     this.control = control
   }
 
+  /** Tenta bindar; porta ocupada (outro processo opencode) → retry até o dono liberar. */
   start(): void {
     if (!this.config.enabled || this.server) return
-    this.server = Bun.serve({
-      hostname: this.config.host,
-      port: this.config.port,
-      fetch: (request) => this.route(request),
-    })
+    this.stopped = false
+    try {
+      this.server = Bun.serve({
+        hostname: this.config.host,
+        port: this.config.port,
+        fetch: (request) => this.route(request),
+      })
+    } catch (error) {
+      if (!(error instanceof Error)) throw error
+      if (!this.warnedBindFailure) {
+        this.warnedBindFailure = true
+        console.warn(`[ci-loop] porta ${this.config.port} em uso; tentando assumir a cada ${BIND_RETRY_MS}ms`)
+      }
+      this.scheduleRetry()
+    }
+  }
+
+  private scheduleRetry(): void {
+    if (this.stopped || this.retryTimer) return
+    const timer = setTimeout(() => {
+      this.retryTimer = null
+      this.start()
+    }, BIND_RETRY_MS)
+    timer.unref?.()
+    this.retryTimer = timer
   }
 
   private async route(request: Request): Promise<Response> {
@@ -94,6 +120,11 @@ export class DashboardServer {
   }
 
   stop(): void {
+    this.stopped = true
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer)
+      this.retryTimer = null
+    }
     for (const client of this.clients) {
       try {
         client.controller.close()

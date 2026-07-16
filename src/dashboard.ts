@@ -22,6 +22,7 @@ export const DASHBOARD_HTML = `<!doctype html>
   .session-head { display: flex; justify-content: space-between; align-items: center; gap: 8px;
     flex-wrap: wrap; }
   .session-id { color: var(--muted); font-size: 12px; }
+  .project { color: var(--text); font-size: 12px; font-weight: 600; margin-right: 8px; }
   .badge { border-radius: 999px; padding: 1px 10px; font-size: 12px; border: 1px solid var(--border); }
   .badge.on { color: var(--green); border-color: var(--green); }
   .badge.off { color: var(--muted); }
@@ -86,8 +87,12 @@ function render(sessions) {
   }
   app.innerHTML = active.map((session) => {
     const badge = session.enabled ? '<span class="badge on">watch on</span>' : '<span class="badge off">watch off</span>';
+    const project = session.directory
+      ? '<span class="project" title="' + esc(session.directory) + '">'
+        + esc(session.directory.split("/").filter(Boolean).pop() || session.directory) + "</span>"
+      : "";
     let html = '<div class="session"><div class="session-head"><span class="session-id">'
-      + esc(session.sessionID) + "</span>" + badge + "</div>";
+      + project + esc(session.sessionID) + "</span>" + badge + "</div>";
     if (session.watch) {
       html += '<div class="watch"><div class="watch-meta">' + esc(session.watch.branch) + " @ "
         + esc(session.watch.sha.slice(0, 8)) + "</div>" + phaseView(session.watch) + "</div>";

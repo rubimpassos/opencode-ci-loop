@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test"
-import { isGitPush } from "./plugin.ts"
+import type { Plugin } from "@opencode-ai/plugin"
+import { CiLoopPlugin, isGitPush } from "./plugin.ts"
 
 describe("isGitPush", () => {
   it.each([
@@ -15,5 +16,34 @@ describe("isGitPush", () => {
     ["git status", false],
   ])("classifies %j as push=%p", (command, expected) => {
     expect(isGitPush(command)).toBe(expected)
+  })
+})
+
+const TEST_PORT = 46021
+
+function makeInstance(directory: string) {
+  const input = { client: {}, directory } as unknown as Parameters<Plugin>[0]
+  return CiLoopPlugin(input, {
+    dashboard: { enabled: false, host: "127.0.0.1", port: TEST_PORT },
+  })
+}
+
+describe("CiLoopPlugin shared state", () => {
+  it("instances in the same process share one registry (toggle visible across instances)", async () => {
+    const a = await makeInstance("/tmp/project-a")
+    const b = await makeInstance("/tmp/project-b")
+    const context = { sessionID: "ses_shared" } as Parameters<
+      NonNullable<Awaited<ReturnType<Plugin>>["tool"]>[string]["execute"]
+    >[1]
+
+    try {
+      await a.tool?.["ci_watch"]?.execute({ action: "disable" }, context)
+      const status = await b.tool?.["ci_watch"]?.execute({ action: "status" }, context)
+
+      expect(status).toContain("desabilitado")
+    } finally {
+      await a.dispose?.()
+      await b.dispose?.()
+    }
   })
 })

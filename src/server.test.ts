@@ -20,7 +20,7 @@ describe("isAllowedHost", () => {
 const TEST_PORT = 45917
 
 function sessionState(id: string, enabled: boolean): SessionState {
-  return { sessionID: id as SessionId, enabled, watch: null }
+  return { sessionID: id as SessionId, enabled, watch: null, directory: null }
 }
 
 function fakeControl(): { control: SessionControl; calls: Array<[string, boolean]> } {
@@ -61,7 +61,12 @@ describe("DashboardServer control routes", () => {
     const response = await fetch(`${base}/sessions/ses_abc`)
 
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ sessionID: "ses_abc", enabled: true, watch: null })
+    expect(await response.json()).toEqual({
+      sessionID: "ses_abc",
+      enabled: true,
+      watch: null,
+      directory: null,
+    })
   })
 
   it("POST /sessions/:id/enabled toggles and returns the new state", async () => {
@@ -75,7 +80,12 @@ describe("DashboardServer control routes", () => {
     })
 
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ sessionID: "ses_abc", enabled: false, watch: null })
+    expect(await response.json()).toEqual({
+      sessionID: "ses_abc",
+      enabled: false,
+      watch: null,
+      directory: null,
+    })
     expect(calls).toEqual([["ses_abc", false]])
   })
 

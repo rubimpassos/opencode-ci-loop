@@ -63,6 +63,8 @@ export type SessionState = {
   readonly sessionID: SessionId
   readonly enabled: boolean
   readonly watch: Watch | null
+  /** Diretório do projeto que reivindicou a sessão; null até um caminho instance-scoped informá-lo (nunca desfeito depois). */
+  readonly directory: string | null
 }
 
 export const PluginConfigSchema = z.object({
