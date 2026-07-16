@@ -1,7 +1,7 @@
 import type { GhClient } from "./gh.ts"
 import type { CommitSha, PluginConfig, SessionId, SessionState, Watch, WatchPhase } from "./types.ts"
 
-/** Subconjunto do GhClient que um watch precisa. Injetado por push (cada projeto tem seu cwd). */
+/** Subset of GhClient that a watch needs. Injected per push (each project has its own cwd). */
 export type CiGh = Pick<GhClient, "listRuns" | "buildReport">
 
 export type Sleep = (ms: number, signal: AbortSignal) => Promise<void>
@@ -24,7 +24,7 @@ export const abortableSleep: Sleep = (ms, signal) =>
 export type RegistryEvents = {
   /** Snapshot completo mudou (dashboard SSE). */
   readonly onChange: (sessions: readonly SessionState[]) => void
-  /** Transição de fase de um watch (toasts). */
+  /** Phase transition of a watch (toasts). */
   readonly onPhase: (sessionID: SessionId, watch: Watch) => Promise<void>
 }
 
@@ -54,7 +54,7 @@ export class WatchRegistry {
     }))
   }
 
-  /** Leitura pura: NÃO cria a sessão (ao contrário de `session`/`isEnabled`); default `autoWatch` se nunca vista. */
+  /** Pure read: does NOT create the session (unlike `session`/`isEnabled`); defaults to `autoWatch` if never seen. */
   sessionView(sessionID: SessionId): SessionState {
     const existing = this.sessions.get(sessionID)
     return {
@@ -87,7 +87,7 @@ export class WatchRegistry {
     }
   }
 
-  /** Inicia (ou substitui) o watch de CI da sessão para o commit dado. */
+  /** Starts (or replaces) the session's CI watch for the given commit. */
   async startWatch(
     sessionID: SessionId,
     sha: CommitSha,

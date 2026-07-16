@@ -40,7 +40,7 @@ describe("CiLoopPlugin shared state", () => {
       await a.tool?.["ci_watch"]?.execute({ action: "disable" }, context)
       const status = await b.tool?.["ci_watch"]?.execute({ action: "status" }, context)
 
-      expect(status).toContain("desabilitado")
+      expect(status).toContain("disabled")
     } finally {
       await a.dispose?.()
       await b.dispose?.()

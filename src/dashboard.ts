@@ -1,6 +1,6 @@
-/** Página única do painel de CI — consome /events (SSE) e renderiza o estado ao vivo. */
+/** Single-page CI dashboard — consumes /events (SSE) and renders the live state. */
 export const DASHBOARD_HTML = `<!doctype html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -50,7 +50,7 @@ export const DASHBOARD_HTML = `<!doctype html>
 </head>
 <body>
 <h1><span class="dot" id="conn"></span>CI Loop</h1>
-<div id="app"><div class="empty">Aguardando push com CI…</div></div>
+<div id="app"><div class="empty">Waiting for a push with CI…</div></div>
 <script>
 const ICONS = { queued: "…", in_progress: "◐", completed: "" };
 function esc(text) {
@@ -64,15 +64,15 @@ function runRow(run) {
 }
 function phaseView(watch) {
   const phase = watch.phase;
-  if (phase.kind === "waiting") return '<div class="phase waiting">Aguardando o CI iniciar…</div>';
+  if (phase.kind === "waiting") return '<div class="phase waiting">Waiting for CI to start…</div>';
   if (phase.kind === "running")
-    return '<div class="phase running">CI rodando</div>' + phase.runs.map(runRow).join("");
+    return '<div class="phase running">CI running</div>' + phase.runs.map(runRow).join("");
   if (phase.kind === "timed-out")
-    return '<div class="phase timed-out">Timeout esperando o CI</div>' + phase.runs.map(runRow).join("");
-  if (phase.kind === "error") return '<div class="phase error">Erro: ' + esc(phase.message) + "</div>";
+    return '<div class="phase timed-out">Timed out waiting for CI</div>' + phase.runs.map(runRow).join("");
+  if (phase.kind === "error") return '<div class="phase error">Error: ' + esc(phase.message) + "</div>";
   const clean = phase.report.runs.every((r) => r.conclusion === "success" || r.conclusion === "skipped");
   let html = '<div class="phase ' + (clean ? "done-ok" : "done-fail") + '">'
-    + (clean ? "✓ CI verde" : "✗ CI com falhas") + "</div>" + phase.report.runs.map(runRow).join("");
+    + (clean ? "✓ CI green" : "✗ CI failed") + "</div>" + phase.report.runs.map(runRow).join("");
   for (const failed of phase.report.failedLogs) {
     html += "<details><summary>" + esc(failed.runName) + "</summary><pre>" + esc(failed.logTail) + "</pre></details>";
   }
@@ -82,7 +82,7 @@ function render(sessions) {
   const app = document.getElementById("app");
   const active = sessions.filter((s) => s.watch || s.enabled);
   if (active.length === 0) {
-    app.innerHTML = '<div class="empty">Aguardando push com CI…</div>';
+    app.innerHTML = '<div class="empty">Waiting for a push with CI…</div>';
     return;
   }
   app.innerHTML = active.map((session) => {

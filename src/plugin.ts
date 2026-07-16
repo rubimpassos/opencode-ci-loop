@@ -1,7 +1,7 @@
 import { type Plugin, tool } from "@opencode-ai/plugin"
 import { bunExec, GhClient } from "./gh.ts"
 import { WatchRegistry } from "./registry.ts"
-import { isReportClean, renderPromptReport, summarizeRuns } from "./render.ts"
+import { isReportClean, renderPromptReport, renderWatchNotice, summarizeRuns } from "./render.ts"
 import { DashboardServer } from "./server.ts"
 import { assertNever, type PluginConfig, PluginConfigSchema, type SessionId, type Watch } from "./types.ts"
 
@@ -36,10 +36,10 @@ function sharedMap(): Map<number, SharedCiLoop> {
 }
 
 /**
- * O opencode instancia o plugin uma vez por projeto/worktree dentro do mesmo processo.
- * Sem compartilhamento, cada instância criaria seu próprio registry + dashboard e só a
- * primeira conseguiria a porta — o dashboard visível ficaria cego às sessões das demais.
- * Estado é um singleton por processo, keyed pela porta do dashboard.
+ * opencode instantiates the plugin once per project/worktree within the same process.
+ * Without sharing, each instance would create its own registry + dashboard and only the first
+ * would get the port — the visible dashboard would be blind to the other instances' sessions.
+ * State is a per-process singleton, keyed by the dashboard port.
  */
 export function acquireShared(config: PluginConfig, client: OpencodeClient): SharedCiLoop {
   const map = sharedMap()
@@ -101,21 +101,21 @@ async function notifyPhase(
 
   switch (phase.kind) {
     case "waiting":
-      await toast("Aguardando o CI iniciar…", "info")
+      await toast("Waiting for CI to start…", "info")
       return
     case "running":
       await toast(`CI: ${summarizeRuns(phase.runs)}`, "info")
       return
     case "timed-out":
-      await toast("Timeout esperando o CI", "warning")
+      await toast("Timed out waiting for CI", "warning")
       return
     case "error":
-      await toast(`CI watch falhou: ${phase.message}`, "error")
+      await toast(`CI watch failed: ${phase.message}`, "error")
       return
     case "done": {
       const clean = isReportClean(phase.report)
       await toast(
-        clean ? `CI verde (${phase.report.runs.length} checks)` : `CI com falhas — injetando relatório`,
+        clean ? `CI green (${phase.report.runs.length} checks)` : `CI failed — injecting report`,
         clean ? "success" : "error",
       )
       await shared.client.session.prompt({
@@ -147,6 +147,7 @@ export const CiLoopPlugin: Plugin = async ({ client, directory }, options) => {
 
       const [sha, branch] = await Promise.all([gh.headSha(), gh.currentBranch()])
       void registry.startWatch(sessionID, sha, branch, gh, directory)
+      output.output += renderWatchNotice(sha, branch)
     },
 
     event: async ({ event }) => {
@@ -158,9 +159,10 @@ export const CiLoopPlugin: Plugin = async ({ client, directory }, options) => {
     tool: {
       ci_watch: tool({
         description:
-          "Controla o CI validation loop desta sessão. Após um `git push`, o loop vigia o GitHub Actions " +
-          "e injeta o resultado (incluindo logs de falha) na sessão. " +
-          "Use action=enable/disable para ligar/desligar nesta sessão, action=status para consultar.",
+          "Controls the CI validation loop for this session. After a `git push`, the loop watches GitHub " +
+          "Actions and injects the result (including failure logs) into the session automatically — you NEVER " +
+          "need to wait for or manually poll CI (no `sleep`, `gh pr checks`, `gh run watch`). " +
+          "Use action=enable/disable to toggle it for this session, action=status to check.",
         args: {
           action: tool.schema.enum(["enable", "disable", "status"]),
         },
@@ -169,17 +171,20 @@ export const CiLoopPlugin: Plugin = async ({ client, directory }, options) => {
           switch (args.action) {
             case "enable":
               registry.setEnabled(sessionID, true, directory)
-              return `CI loop HABILITADO nesta sessão. Dashboard: ${dashboard.url}`
+              return (
+                "CI loop ENABLED for this session. After a push, the CI result is injected here " +
+                `automatically — don't poll manually (sleep/gh pr checks). Dashboard: ${dashboard.url}`
+              )
             case "disable":
               registry.setEnabled(sessionID, false, directory)
-              return "CI loop DESABILITADO nesta sessão (watch ativo cancelado)."
+              return "CI loop DISABLED for this session (active watch cancelled)."
             case "status": {
               const enabled = registry.isEnabled(sessionID, directory)
               const watch = registry.snapshot().find((s) => s.sessionID === sessionID)?.watch
               const phase = watch
-                ? `; watch atual: ${watch.phase.kind} (${watch.branch}@${watch.sha.slice(0, 8)})`
+                ? `; current watch: ${watch.phase.kind} (${watch.branch}@${watch.sha.slice(0, 8)})`
                 : ""
-              return `CI loop ${enabled ? "habilitado" : "desabilitado"}${phase}. Dashboard: ${dashboard.url}`
+              return `CI loop ${enabled ? "enabled" : "disabled"}${phase}. Dashboard: ${dashboard.url}`
             }
             default:
               return assertNever(args.action)

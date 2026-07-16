@@ -63,7 +63,7 @@ export type SessionState = {
   readonly sessionID: SessionId
   readonly enabled: boolean
   readonly watch: Watch | null
-  /** Diretório do projeto que reivindicou a sessão; null até um caminho instance-scoped informá-lo (nunca desfeito depois). */
+  /** Directory of the project that claimed the session; null until an instance-scoped path provides it (never undone afterward). */
   readonly directory: string | null
 }
 

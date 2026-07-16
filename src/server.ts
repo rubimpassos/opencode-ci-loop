@@ -6,7 +6,7 @@ type SseClient = {
   readonly controller: ReadableStreamDefaultController<Uint8Array>
 }
 
-/** Controle externo (OpenChamber) do toggle por sessão. `getSession` é leitura pura. */
+/** External control (OpenChamber) of the per-session toggle. `getSession` is a pure read. */
 export type SessionControl = {
   readonly getSession: (sessionID: string) => SessionState
   readonly setEnabled: (sessionID: string, enabled: boolean) => SessionState
@@ -38,7 +38,7 @@ export class DashboardServer {
     this.control = control
   }
 
-  /** Tenta bindar; porta ocupada (outro processo opencode) → retry até o dono liberar. */
+  /** Tries to bind; port taken (another opencode process) → retry until the owner frees it. */
   start(): void {
     if (!this.config.enabled || this.server) return
     this.stopped = false
@@ -52,7 +52,9 @@ export class DashboardServer {
       if (!(error instanceof Error)) throw error
       if (!this.warnedBindFailure) {
         this.warnedBindFailure = true
-        console.warn(`[ci-loop] porta ${this.config.port} em uso; tentando assumir a cada ${BIND_RETRY_MS}ms`)
+        console.warn(
+          `[ci-loop] port ${this.config.port} in use; retrying to take it over every ${BIND_RETRY_MS}ms`,
+        )
       }
       this.scheduleRetry()
     }
@@ -165,7 +167,7 @@ function encodeEvent(snapshot: readonly SessionState[]): Uint8Array {
   return new TextEncoder().encode(`data: ${JSON.stringify(snapshot)}\n\n`)
 }
 
-/** Barra DNS rebinding: só aceita requests endereçados ao próprio loopback. */
+/** Blocks DNS rebinding: only accepts requests addressed to loopback itself. */
 export function isAllowedHost(hostHeader: string | null, port: number): boolean {
   if (hostHeader === null) return false
   const allowed = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`]

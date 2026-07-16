@@ -14,7 +14,7 @@ export type ExecResult = {
   readonly stderr: string
 }
 
-/** Executa um comando (argv) num diretório. Injetável para testes. */
+/** Runs a command (argv) in a directory. Injectable for tests. */
 export type Exec = (argv: readonly string[], cwd: string) => Promise<ExecResult>
 
 export class GhError extends Error {
@@ -83,8 +83,8 @@ export class GhClient {
   }
 
   /**
-   * URL do repo pra onde o push foi (remote de @{push}, fallback origin).
-   * Necessário porque `gh` resolve o default pro remote `upstream` em forks.
+   * URL of the repo the push went to (remote from @{push}, origin fallback).
+   * Needed because `gh` resolves the default to the `upstream` remote on forks.
    */
   async pushRepoUrl(): Promise<string> {
     if (this.repoUrl) return this.repoUrl

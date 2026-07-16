@@ -17,7 +17,7 @@ function makeRun(status: WorkflowRun["status"], conclusion: WorkflowRun["conclus
   }
 }
 
-/** Fake CiGh: cada chamada a listRuns consome a próxima resposta do roteiro. */
+/** Fake CiGh: each listRuns call consumes the next scripted response. */
 function fakeGh(script: readonly (readonly WorkflowRun[])[]): CiGh {
   let call = 0
   return {
