@@ -56,7 +56,7 @@ export function acquireShared(config: PluginConfig, client: OpencodeClient): Sha
   const registry = new WatchRegistry(config, {
     onChange: (sessions) => dashboard.broadcast(sessions),
     onPhase: async (sessionID, watch) => {
-      await notifyPhase(shared, lastToastedPhase, sessionID, watch)
+      await notifyPhase(shared.client, lastToastedPhase, sessionID, watch)
     },
   })
 
@@ -84,8 +84,29 @@ export function releaseShared(port: number): void {
   map.delete(port)
 }
 
-async function notifyPhase(
-  shared: SharedCiLoop,
+/**
+ * Model last used in the session, so the injected report replies on it — not the agent default.
+ * The user may have switched models mid-session; without this the prompt reverts to the default.
+ */
+export async function resolveSessionModel(
+  client: OpencodeClient,
+  sessionID: SessionId,
+): Promise<{ providerID: string; modelID: string } | undefined> {
+  try {
+    const response = await client.session.messages({ path: { id: sessionID } })
+    const messages = response.data ?? []
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const info = messages[i]?.info
+      if (info?.role === "assistant") return { providerID: info.providerID, modelID: info.modelID }
+    }
+  } catch (error) {
+    if (!(error instanceof Error)) throw error
+  }
+  return undefined
+}
+
+export async function notifyPhase(
+  client: OpencodeClient,
   lastToastedPhase: Map<SessionId, string>,
   sessionID: SessionId,
   watch: Watch,
@@ -96,7 +117,7 @@ async function notifyPhase(
   lastToastedPhase.set(sessionID, fingerprint)
 
   const toast = async (message: string, variant: "info" | "success" | "warning" | "error") => {
-    await shared.client.tui.showToast({ body: { title: "CI Loop", message, variant } })
+    await client.tui.showToast({ body: { title: "CI Loop", message, variant } })
   }
 
   switch (phase.kind) {
@@ -118,9 +139,10 @@ async function notifyPhase(
         clean ? `CI green (${phase.report.runs.length} checks)` : `CI failed — injecting report`,
         clean ? "success" : "error",
       )
-      await shared.client.session.prompt({
+      const model = await resolveSessionModel(client, sessionID)
+      await client.session.prompt({
         path: { id: sessionID },
-        body: { parts: [{ type: "text", text: renderPromptReport(phase.report) }] },
+        body: { ...(model && { model }), parts: [{ type: "text", text: renderPromptReport(phase.report) }] },
       })
       return
     }
