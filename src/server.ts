@@ -18,6 +18,10 @@ const SESSION_PATH = /^\/sessions\/([^/]+?)(\/enabled)?$/
 
 const BIND_RETRY_MS = 15_000
 
+const DASHBOARD_MARKER_HEADER = "x-ci-loop"
+const DASHBOARD_MARKER_VALUE = "dashboard"
+const PROBE_TIMEOUT_MS = 1_000
+
 /** Mini servidor HTTP+SSE do dashboard. Broadcast de snapshots pros clientes conectados. */
 export class DashboardServer {
   private readonly clients = new Set<SseClient>()
@@ -50,13 +54,31 @@ export class DashboardServer {
       })
     } catch (error) {
       if (!(error instanceof Error)) throw error
-      if (!this.warnedBindFailure) {
-        this.warnedBindFailure = true
-        console.warn(
-          `[ci-loop] port ${this.config.port} in use; retrying to take it over every ${BIND_RETRY_MS}ms`,
-        )
-      }
+      void this.warnIfForeignOwner()
       this.scheduleRetry()
+    }
+  }
+
+  /** Sibling opencode dashboard on the port → silent takeover retry. Foreign process → warn once. */
+  private async warnIfForeignOwner(): Promise<void> {
+    if (this.warnedBindFailure) return
+    if (await this.portOwnerIsSiblingDashboard()) return
+    if (this.warnedBindFailure) return
+    this.warnedBindFailure = true
+    console.warn(
+      `[ci-loop] port ${this.config.port} in use by another process; retrying to take it over every ${BIND_RETRY_MS}ms`,
+    )
+  }
+
+  private async portOwnerIsSiblingDashboard(): Promise<boolean> {
+    try {
+      const response = await fetch(`${this.url}/state`, {
+        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+      })
+      return response.headers.get(DASHBOARD_MARKER_HEADER) === DASHBOARD_MARKER_VALUE
+    } catch (error) {
+      if (!(error instanceof Error)) throw error
+      return false
     }
   }
 
@@ -84,7 +106,9 @@ export class DashboardServer {
       case "/":
         return new Response(DASHBOARD_HTML, { headers: { "content-type": "text/html; charset=utf-8" } })
       case "/state":
-        return Response.json(this.lastSnapshot)
+        return Response.json(this.lastSnapshot, {
+          headers: { [DASHBOARD_MARKER_HEADER]: DASHBOARD_MARKER_VALUE },
+        })
       case "/events":
         return this.sse()
       default:
