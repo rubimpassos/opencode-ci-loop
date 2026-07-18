@@ -38,11 +38,44 @@ export type FailedRunLog = {
   readonly logTail: string
 }
 
+export const PR_STATES = ["OPEN", "CLOSED", "MERGED"] as const
+export type PrState = (typeof PR_STATES)[number]
+
+export const PR_MERGEABLE_STATES = ["MERGEABLE", "CONFLICTING", "UNKNOWN"] as const
+export type PrMergeable = (typeof PR_MERGEABLE_STATES)[number]
+
+export const PR_MERGE_STATE_STATUSES = [
+  "BEHIND",
+  "BLOCKED",
+  "CLEAN",
+  "DIRTY",
+  "DRAFT",
+  "HAS_HOOKS",
+  "UNKNOWN",
+  "UNSTABLE",
+] as const
+export type PrMergeStateStatus = (typeof PR_MERGE_STATE_STATUSES)[number]
+
+export const PR_REVIEW_DECISIONS = ["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"] as const
+export type PrReviewDecision = (typeof PR_REVIEW_DECISIONS)[number]
+
+export type PrInfo = {
+  readonly number: number
+  readonly title: string
+  readonly url: string
+  readonly isDraft: boolean
+  readonly state: PrState
+  readonly mergeable: PrMergeable
+  readonly mergeStateStatus: PrMergeStateStatus
+  readonly reviewDecision: PrReviewDecision | null
+}
+
 export type CiReport = {
   readonly sha: CommitSha
   readonly branch: string
   readonly runs: readonly WorkflowRun[]
   readonly failedLogs: readonly FailedRunLog[]
+  readonly pr: PrInfo | null
 }
 
 export type WatchPhase =

@@ -27,6 +27,7 @@ function fakeGh(script: readonly (readonly WorkflowRun[])[]): CiGh {
       branch,
       runs: script[script.length - 1] ?? [],
       failedLogs: [],
+      pr: null,
     }),
   }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { type Exec, GhClient, GhError, parseRunList } from "./gh.ts"
+import { type Exec, type ExecResult, GhClient, GhError, parseRunList } from "./gh.ts"
 import type { CommitSha } from "./types.ts"
 
 const RUN_LIST_JSON = JSON.stringify([
@@ -23,6 +23,17 @@ const RUN_LIST_JSON = JSON.stringify([
   },
 ])
 
+const PR_JSON = JSON.stringify({
+  number: 12,
+  title: "feat: nova feature",
+  url: "https://github.com/o/r/pull/12",
+  state: "OPEN",
+  isDraft: false,
+  mergeable: "MERGEABLE",
+  mergeStateStatus: "CLEAN",
+  reviewDecision: "APPROVED",
+})
+
 describe("parseRunList", () => {
   it("parses gh run list JSON into typed workflow runs", () => {
     const runs = parseRunList(RUN_LIST_JSON)
@@ -34,11 +45,13 @@ describe("parseRunList", () => {
   })
 })
 
-function scriptedExec(script: Record<string, string>): Exec {
+function scriptedExec(script: Record<string, string | ExecResult>): Exec {
   return async (argv) => {
     const key = argv.join(" ")
-    for (const [pattern, stdout] of Object.entries(script)) {
-      if (key.startsWith(pattern)) return { exitCode: 0, stdout, stderr: "" }
+    for (const [pattern, response] of Object.entries(script)) {
+      if (key.startsWith(pattern)) {
+        return typeof response === "string" ? { exitCode: 0, stdout: response, stderr: "" } : response
+      }
     }
     return { exitCode: 1, stdout: "", stderr: `no script for: ${key}` }
   }
@@ -82,11 +95,63 @@ describe("GhClient", () => {
     expect(seen.some((cmd) => cmd.startsWith("gh run list -R https://github.com/o/r "))).toBe(true)
   })
 
+  it("finds the open PR for a branch", async () => {
+    const client = new GhClient(
+      scriptedExec({
+        ...GIT_REMOTE_SCRIPT,
+        "gh pr view": PR_JSON,
+      }),
+      "/repo",
+    )
+
+    const pr = await client.findPrForBranch("feat/x")
+
+    expect(pr).toEqual({
+      number: 12,
+      title: "feat: nova feature",
+      url: "https://github.com/o/r/pull/12",
+      state: "OPEN",
+      isDraft: false,
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "CLEAN",
+      reviewDecision: "APPROVED",
+    })
+  })
+
+  it("returns null when no PR exists for the branch", async () => {
+    const client = new GhClient(
+      scriptedExec({
+        ...GIT_REMOTE_SCRIPT,
+        "gh pr view": {
+          exitCode: 1,
+          stdout: "",
+          stderr: 'no pull requests found for branch "feat/x"',
+        },
+      }),
+      "/repo",
+    )
+
+    expect(await client.findPrForBranch("feat/x")).toBeNull()
+  })
+
+  it("propagates gh failures other than a missing PR", async () => {
+    const client = new GhClient(
+      scriptedExec({
+        ...GIT_REMOTE_SCRIPT,
+        "gh pr view": { exitCode: 1, stdout: "", stderr: "authentication required" },
+      }),
+      "/repo",
+    )
+
+    expect(client.findPrForBranch("feat/x")).rejects.toBeInstanceOf(GhError)
+  })
+
   it("builds a report with failure logs only for failed runs", async () => {
     const exec = scriptedExec({
       ...GIT_REMOTE_SCRIPT,
       "gh run list": RUN_LIST_JSON.replace('"in_progress"', '"completed"').replace('""', '"success"'),
       "gh run view": "line1\nline2\nBOOM: test failed\n",
+      "gh pr view": PR_JSON,
     })
     const client = new GhClient(exec, "/repo")
 
@@ -96,6 +161,7 @@ describe("GhClient", () => {
     expect(report.failedLogs).toHaveLength(1)
     expect(report.failedLogs[0]?.runId).toBe(101)
     expect(report.failedLogs[0]?.logTail).toBe("BOOM: test failed\n")
+    expect(report.pr?.number).toBe(12)
   })
 
   it("throws GhError with command context when gh fails", async () => {

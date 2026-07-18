@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test"
-import { isReportClean, renderPromptReport, renderWatchNotice, summarizeRuns } from "./render.ts"
-import type { CiReport, CommitSha, WorkflowRun } from "./types.ts"
+import { isReportClean, prReadiness, renderPromptReport, renderWatchNotice, summarizeRuns } from "./render.ts"
+import type { CiReport, CommitSha, PrInfo, WorkflowRun } from "./types.ts"
 
 function makeRun(overrides: Partial<WorkflowRun>): WorkflowRun {
   return {
@@ -15,8 +15,26 @@ function makeRun(overrides: Partial<WorkflowRun>): WorkflowRun {
   }
 }
 
-function makeReport(runs: readonly WorkflowRun[], failedLogs: CiReport["failedLogs"] = []): CiReport {
-  return { sha: "abcdef1234567890" as CommitSha, branch: "main", runs, failedLogs }
+function makePr(overrides: Partial<PrInfo> = {}): PrInfo {
+  return {
+    number: 12,
+    title: "feat: nova feature",
+    url: "https://github.com/o/r/pull/12",
+    isDraft: false,
+    state: "OPEN",
+    mergeable: "MERGEABLE",
+    mergeStateStatus: "CLEAN",
+    reviewDecision: "APPROVED",
+    ...overrides,
+  }
+}
+
+function makeReport(
+  runs: readonly WorkflowRun[],
+  failedLogs: CiReport["failedLogs"] = [],
+  pr: PrInfo | null = null,
+): CiReport {
+  return { sha: "abcdef1234567890" as CommitSha, branch: "main", runs, failedLogs, pr }
 }
 
 describe("summarizeRuns", () => {
@@ -49,6 +67,50 @@ describe("isReportClean", () => {
   })
 })
 
+describe("prReadiness", () => {
+  it("is ready when the PR and CI are clean", () => {
+    expect(prReadiness(makePr(), true)).toEqual({ ready: true, blockers: [] })
+  })
+
+  it("blocks draft PRs", () => {
+    expect(prReadiness(makePr({ isDraft: true }), true)).toEqual({
+      ready: false,
+      blockers: ["PR is a draft"],
+    })
+  })
+
+  it("blocks PRs with merge conflicts", () => {
+    expect(prReadiness(makePr({ mergeable: "CONFLICTING" }), true)).toEqual({
+      ready: false,
+      blockers: ["Merge conflicts with the base branch"],
+    })
+  })
+
+  it("blocks PRs with requested changes", () => {
+    expect(prReadiness(makePr({ reviewDecision: "CHANGES_REQUESTED" }), true)).toEqual({
+      ready: false,
+      blockers: ["Changes requested in review"],
+    })
+  })
+
+  it("blocks PRs while CI is not clean", () => {
+    expect(prReadiness(makePr(), false)).toEqual({
+      ready: false,
+      blockers: ["CI checks failing"],
+    })
+  })
+
+  it("reports pending GitHub mergeability only when it is the sole blocker", () => {
+    expect(prReadiness(makePr({ mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }), true)).toEqual({
+      ready: false,
+      blockers: ["GitHub hasn't computed mergeability yet"],
+    })
+    expect(prReadiness(makePr({ isDraft: true, mergeable: "UNKNOWN" }), true).blockers).toEqual([
+      "PR is a draft",
+    ])
+  })
+})
+
 describe("renderPromptReport", () => {
   it("tells the agent no action is needed when CI is green", () => {
     const report = makeReport([makeRun({})])
@@ -56,6 +118,24 @@ describe("renderPromptReport", () => {
     expect(text).toContain("abcdef12")
     expect(text).toContain("No action needed")
     expect(text).not.toContain("Failure logs")
+    expect(text).not.toContain("Pull request")
+  })
+
+  it("shows a ready-to-merge PR when CI is green", () => {
+    const text = renderPromptReport(makeReport([makeRun({})], [], makePr()))
+
+    expect(text).toContain("#12 — feat: nova feature")
+    expect(text).toContain("https://github.com/o/r/pull/12")
+    expect(text).toContain("✅ Ready to merge")
+    expect(text).toContain("do not reply")
+  })
+
+  it("shows PR blockers instead of claiming no action is needed", () => {
+    const text = renderPromptReport(makeReport([makeRun({})], [], makePr({ isDraft: true })))
+
+    expect(text).toContain("🚧 Not ready to merge:")
+    expect(text).toContain("- PR is a draft")
+    expect(text).not.toContain("No action needed")
   })
 
   it("includes failure logs and fix instructions when CI failed", () => {

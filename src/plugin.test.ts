@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test"
 import type { Plugin } from "@opencode-ai/plugin"
 import { CiLoopPlugin, isGitPush, notifyPhase, resolveSessionModel } from "./plugin.ts"
-import type { CommitSha, SessionId, Watch } from "./types.ts"
+import type { CommitSha, PrInfo, SessionId, Watch } from "./types.ts"
 
 describe("isGitPush", () => {
   it.each([
@@ -86,7 +86,21 @@ describe("resolveSessionModel", () => {
   })
 })
 
-function doneWatch(runsSucceed: boolean): Watch {
+function makePr(overrides: Partial<PrInfo> = {}): PrInfo {
+  return {
+    number: 12,
+    title: "feat: nova feature",
+    url: "https://github.com/o/r/pull/12",
+    isDraft: false,
+    state: "OPEN",
+    mergeable: "MERGEABLE",
+    mergeStateStatus: "CLEAN",
+    reviewDecision: "APPROVED",
+    ...overrides,
+  }
+}
+
+function doneWatch(runsSucceed: boolean, pr: PrInfo | null = null): Watch {
   const sha = "abc12345def0" as CommitSha
   return {
     sha,
@@ -111,20 +125,28 @@ function doneWatch(runsSucceed: boolean): Watch {
             ]
           : [],
         failedLogs: [],
+        pr,
       },
     },
   }
 }
 
 type PromptBody = { model?: { providerID: string; modelID: string }; parts: unknown }
+type ToastBody = { title: string; message: string; variant: string }
 
 function recordingClient(messages: ReadonlyArray<{ info: Record<string, unknown> }>): {
   client: Client
   prompts: PromptBody[]
+  toasts: ToastBody[]
 } {
   const prompts: PromptBody[] = []
+  const toasts: ToastBody[] = []
   const client = {
-    tui: { showToast: async () => {} },
+    tui: {
+      showToast: async (opts: { body: ToastBody }) => {
+        toasts.push(opts.body)
+      },
+    },
     session: {
       messages: async () => ({ data: messages }),
       prompt: async (opts: { body: PromptBody }) => {
@@ -133,8 +155,39 @@ function recordingClient(messages: ReadonlyArray<{ info: Record<string, unknown>
       },
     },
   } as unknown as Client
-  return { client, prompts }
+  return { client, prompts, toasts }
 }
+
+describe("notifyPhase done toast", () => {
+  it("keeps the CI-only text when the branch has no PR", async () => {
+    const { client, toasts } = recordingClient([])
+
+    await notifyPhase(client, new Map(), "ses_ci" as SessionId, doneWatch(true))
+
+    expect(toasts[0]?.message).toBe("CI green (1 checks)")
+  })
+
+  it("appends ready-to-merge status when the branch has a ready PR", async () => {
+    const { client, toasts } = recordingClient([])
+
+    await notifyPhase(client, new Map(), "ses_ready" as SessionId, doneWatch(true, makePr()))
+
+    expect(toasts[0]?.message).toBe("CI green (1 checks) · PR #12 ready to merge")
+  })
+
+  it("appends the blocker count when the branch PR is not ready", async () => {
+    const { client, toasts } = recordingClient([])
+
+    await notifyPhase(
+      client,
+      new Map(),
+      "ses_blocked" as SessionId,
+      doneWatch(true, makePr({ isDraft: true })),
+    )
+
+    expect(toasts[0]?.message).toBe("CI green (1 checks) · PR #12 blocked: 1 issue")
+  })
+})
 
 describe("notifyPhase model preservation", () => {
   it("injects the CI report on the session's last-used model", async () => {

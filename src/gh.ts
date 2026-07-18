@@ -3,6 +3,11 @@ import {
   type CiReport,
   type CommitSha,
   type FailedRunLog,
+  PR_MERGE_STATE_STATUSES,
+  PR_MERGEABLE_STATES,
+  PR_REVIEW_DECISIONS,
+  PR_STATES,
+  type PrInfo,
   RUN_CONCLUSIONS,
   RUN_STATUSES,
   type WorkflowRun,
@@ -44,6 +49,21 @@ const GhRunSchema = z.object({
 
 const GhRunListSchema = z.array(GhRunSchema)
 
+const GhPrSchema = z.object({
+  number: z.number(),
+  title: z.string().catch(""),
+  url: z.string(),
+  state: z.enum(PR_STATES).catch("OPEN"),
+  isDraft: z.boolean().catch(false),
+  mergeable: z.enum(PR_MERGEABLE_STATES).catch("UNKNOWN"),
+  mergeStateStatus: z.enum(PR_MERGE_STATE_STATUSES).catch("UNKNOWN"),
+  reviewDecision: z
+    .enum(PR_REVIEW_DECISIONS)
+    .nullable()
+    .catch(null)
+    .or(z.literal("").transform(() => null)),
+})
+
 export function parseRunList(json: string): readonly WorkflowRun[] {
   const parsed = GhRunListSchema.parse(JSON.parse(json))
   return parsed.map((run) => ({
@@ -68,6 +88,8 @@ export const bunExec: Exec = async (argv, cwd) => {
 }
 
 const RUN_LIST_FIELDS = "databaseId,displayTitle,workflowName,status,conclusion,url,headBranch"
+const PR_FIELDS = "number,title,url,state,isDraft,mergeable,mergeStateStatus,reviewDecision"
+const NO_PR_MESSAGE = "no pull requests found for branch"
 
 export class GhClient {
   private repoUrl: string | null = null
@@ -132,11 +154,23 @@ export class GhClient {
     return { runId: run.id, runName: run.name, logTail }
   }
 
+  async findPrForBranch(branch: string): Promise<PrInfo | null> {
+    const repo = await this.pushRepoUrl()
+    const argv = ["gh", "pr", "view", branch, "-R", repo, "--json", PR_FIELDS] as const
+    const result = await this.exec(argv, this.directory)
+    if (result.exitCode !== 0) {
+      if (result.stderr.includes(NO_PR_MESSAGE)) return null
+      throw new GhError(argv, result.exitCode, result.stderr)
+    }
+    const pr = GhPrSchema.parse(JSON.parse(result.stdout))
+    return pr.state === "OPEN" ? pr : null
+  }
+
   async buildReport(sha: CommitSha, branch: string, maxLogLines: number): Promise<CiReport> {
-    const runs = await this.listRuns(sha)
+    const [runs, pr] = await Promise.all([this.listRuns(sha), this.findPrForBranch(branch)])
     const failed = runs.filter((run) => run.conclusion === "failure" || run.conclusion === "timed_out")
     const failedLogs = await Promise.all(failed.map((run) => this.failedLog(run, maxLogLines)))
-    return { sha, branch, runs, failedLogs }
+    return { sha, branch, runs, failedLogs, pr }
   }
 
   private async run(argv: readonly string[]): Promise<ExecResult> {

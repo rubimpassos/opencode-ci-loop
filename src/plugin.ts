@@ -1,7 +1,7 @@
 import { type Plugin, tool } from "@opencode-ai/plugin"
 import { bunExec, GhClient } from "./gh.ts"
 import { WatchRegistry } from "./registry.ts"
-import { isReportClean, renderPromptReport, renderWatchNotice, summarizeRuns } from "./render.ts"
+import { isReportClean, prReadiness, renderPromptReport, renderWatchNotice, summarizeRuns } from "./render.ts"
 import { DashboardServer } from "./server.ts"
 import { assertNever, type PluginConfig, PluginConfigSchema, type SessionId, type Watch } from "./types.ts"
 
@@ -135,10 +135,15 @@ export async function notifyPhase(
       return
     case "done": {
       const clean = isReportClean(phase.report)
-      await toast(
-        clean ? `CI green (${phase.report.runs.length} checks)` : `CI failed — injecting report`,
-        clean ? "success" : "error",
-      )
+      let message = clean ? `CI green (${phase.report.runs.length} checks)` : "CI failed — injecting report"
+      if (phase.report.pr) {
+        const readiness = prReadiness(phase.report.pr, clean)
+        const prStatus = readiness.ready
+          ? "ready to merge"
+          : `blocked: ${readiness.blockers.length} issue${readiness.blockers.length === 1 ? "" : "s"}`
+        message += ` · PR #${phase.report.pr.number} ${prStatus}`
+      }
+      await toast(message, clean ? "success" : "error")
       const model = await resolveSessionModel(client, sessionID)
       await client.session.prompt({
         path: { id: sessionID },
