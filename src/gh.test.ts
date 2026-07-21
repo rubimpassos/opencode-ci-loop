@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import { type Exec, type ExecResult, GhClient, GhError, parseRunList } from "./gh.ts"
-import type { CommitSha } from "./types.ts"
+import type { CommitSha, PushTarget } from "./types.ts"
 
 const RUN_LIST_JSON = JSON.stringify([
   {
@@ -64,6 +64,14 @@ const GIT_REMOTE_SCRIPT = {
 
 describe("GhClient", () => {
   const sha = "abc123" as CommitSha
+  const target: PushTarget = {
+    sha,
+    branch: "feat/x",
+    repo: "github.com/o/r",
+    repoUrl: "https://github.com/o/r",
+    directory: "/repo-feature",
+    sourceKind: "linked-worktree",
+  }
 
   it("resolves the push repo from @{push} instead of gh's default (upstream in forks)", async () => {
     const client = new GhClient(scriptedExec(GIT_REMOTE_SCRIPT), "/repo")
@@ -76,6 +84,12 @@ describe("GhClient", () => {
       "/repo",
     )
     expect(await client.pushRepoUrl()).toBe("https://github.com/o/r")
+  })
+
+  it("uses an explicit push repo without consulting the working directory", async () => {
+    const client = new GhClient(scriptedExec({}), "/wrong-repo", "https://ghe.example.com/acme/widget")
+
+    expect(await client.pushRepoUrl()).toBe("https://ghe.example.com/acme/widget")
   })
 
   it("targets gh commands at the push repo", async () => {
@@ -93,6 +107,26 @@ describe("GhClient", () => {
     await client.listRuns(sha)
 
     expect(seen.some((cmd) => cmd.startsWith("gh run list -R https://github.com/o/r "))).toBe(true)
+  })
+
+  it("filters same-commit runs to the destination branch", async () => {
+    const mixedBranches = JSON.stringify([
+      ...JSON.parse(RUN_LIST_JSON),
+      {
+        databaseId: 103,
+        displayTitle: "release",
+        workflowName: "CI",
+        status: "completed",
+        conclusion: "success",
+        url: "https://github.com/o/r/actions/runs/103",
+        headBranch: "release",
+      },
+    ])
+    const client = new GhClient(scriptedExec({ "gh run list": mixedBranches }), "/repo", target.repoUrl)
+
+    const runs = await client.listRuns(sha, "feat/x")
+
+    expect(runs.map((run) => run.branch)).toEqual(["feat/x", "feat/x"])
   })
 
   it("finds the open PR for a branch", async () => {
@@ -153,15 +187,18 @@ describe("GhClient", () => {
       "gh run view": "line1\nline2\nBOOM: test failed\n",
       "gh pr view": PR_JSON,
     })
-    const client = new GhClient(exec, "/repo")
+    const client = new GhClient(exec, "/repo", target.repoUrl)
 
-    const report = await client.buildReport(sha, "feat/x", 2)
+    const report = await client.buildReport(target, 2)
 
     expect(report.runs).toHaveLength(2)
     expect(report.failedLogs).toHaveLength(1)
     expect(report.failedLogs[0]?.runId).toBe(101)
     expect(report.failedLogs[0]?.logTail).toBe("BOOM: test failed\n")
     expect(report.pr?.number).toBe(12)
+    expect(report.repo).toBe("github.com/o/r")
+    expect(report.sourceKind).toBe("linked-worktree")
+    expect(report.directory).toBe("/repo-feature")
   })
 
   it("throws GhError with command context when gh fails", async () => {

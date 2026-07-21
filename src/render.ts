@@ -1,4 +1,11 @@
-import { assertNever, type CiReport, type PrInfo, type WorkflowRun } from "./types.ts"
+import {
+  assertNever,
+  type CiReport,
+  type PrInfo,
+  type PushTarget,
+  type WatchSourceKind,
+  type WorkflowRun,
+} from "./types.ts"
 
 export function runIcon(run: WorkflowRun): string {
   switch (run.status) {
@@ -104,11 +111,15 @@ export function prReadiness(
 }
 
 /** Notice appended to `git push` output to stop manual CI polling (the result is injected on its own). */
-export function renderWatchNotice(sha: string, branch: string): string {
+export function renderWatchNotice(targets: readonly PushTarget[]): string {
   return [
     "",
     "",
-    `[ci-loop] CI watch started automatically for \`${sha.slice(0, 8)}\` (branch \`${branch}\`).`,
+    "[ci-loop] CI watch started automatically for:",
+    ...targets.map(
+      (target) =>
+        `- ${target.repo} · ${target.branch} @ \`${target.sha.slice(0, 8)}\` — ${sourceLabel(target.sourceKind, target.directory)}`,
+    ),
     "Do NOT wait for or manually poll CI — no `sleep`, `gh pr checks`, `gh run watch` or equivalent.",
     "The result (green or with failure logs) will be injected into THIS session automatically when CI finishes.",
     "Move on to other work or end your turn; you'll be pinged when there's a result.",
@@ -119,7 +130,8 @@ export function renderWatchNotice(sha: string, branch: string): string {
 export function renderPromptReport(report: CiReport): string {
   const ciClean = isReportClean(report)
   const lines: string[] = [
-    `[ci-loop] CI result for push \`${report.sha.slice(0, 8)}\` (branch \`${report.branch}\`):`,
+    `[ci-loop] CI result for ${report.repo} · ${report.branch} push \`${report.sha.slice(0, 8)}\`:`,
+    `Source: ${sourceLabel(report.sourceKind, report.directory)}`,
     "",
   ]
   for (const run of report.runs) {
@@ -172,4 +184,19 @@ export function renderPromptReport(report: CiReport): string {
     "If the failure is unrelated to your changes, just report that.",
   )
   return lines.join("\n")
+}
+
+export function sourceLabel(sourceKind: WatchSourceKind, directory: string | null): string {
+  switch (sourceKind) {
+    case "session":
+      return "current branch of this session"
+    case "linked-worktree":
+      return `linked worktree at ${directory ?? "unknown directory"}`
+    case "external-repo":
+      return `external repo at ${directory ?? "unknown directory"}`
+    case "unknown":
+      return "source directory unknown"
+    default:
+      return assertNever(sourceKind)
+  }
 }

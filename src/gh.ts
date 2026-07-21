@@ -8,6 +8,7 @@ import {
   PR_REVIEW_DECISIONS,
   PR_STATES,
   type PrInfo,
+  type PushTarget,
   RUN_CONCLUSIONS,
   RUN_STATUSES,
   type WorkflowRun,
@@ -97,7 +98,10 @@ export class GhClient {
   constructor(
     private readonly exec: Exec,
     private readonly directory: string,
-  ) {}
+    repoOverride?: string,
+  ) {
+    this.repoUrl = repoOverride ?? null
+  }
 
   async headSha(): Promise<CommitSha> {
     const result = await this.run(["git", "rev-parse", "HEAD"])
@@ -125,7 +129,7 @@ export class GhClient {
     return result.stdout.trim()
   }
 
-  async listRuns(sha: CommitSha): Promise<readonly WorkflowRun[]> {
+  async listRuns(sha: CommitSha, branch?: string): Promise<readonly WorkflowRun[]> {
     const repo = await this.pushRepoUrl()
     const result = await this.run([
       "gh",
@@ -140,7 +144,8 @@ export class GhClient {
       "--limit",
       "30",
     ])
-    return parseRunList(result.stdout)
+    const runs = parseRunList(result.stdout)
+    return branch === undefined ? runs : runs.filter((run) => run.branch === branch)
   }
 
   async failedLog(run: WorkflowRun, maxLines: number): Promise<FailedRunLog> {
@@ -166,11 +171,24 @@ export class GhClient {
     return pr.state === "OPEN" ? pr : null
   }
 
-  async buildReport(sha: CommitSha, branch: string, maxLogLines: number): Promise<CiReport> {
-    const [runs, pr] = await Promise.all([this.listRuns(sha), this.findPrForBranch(branch)])
+  async buildReport(target: PushTarget, maxLogLines: number): Promise<CiReport> {
+    this.repoUrl = target.repoUrl
+    const [runs, pr] = await Promise.all([
+      this.listRuns(target.sha, target.branch),
+      this.findPrForBranch(target.branch),
+    ])
     const failed = runs.filter((run) => run.conclusion === "failure" || run.conclusion === "timed_out")
     const failedLogs = await Promise.all(failed.map((run) => this.failedLog(run, maxLogLines)))
-    return { sha, branch, runs, failedLogs, pr }
+    return {
+      sha: target.sha,
+      branch: target.branch,
+      repo: target.repo,
+      sourceKind: target.sourceKind,
+      directory: target.directory,
+      runs,
+      failedLogs,
+      pr,
+    }
   }
 
   private async run(argv: readonly string[]): Promise<ExecResult> {

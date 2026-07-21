@@ -5,6 +5,19 @@ type Brand<T, B extends string> = T & { readonly [brand]: B }
 
 export type SessionId = Brand<string, "SessionId">
 export type CommitSha = Brand<string, "CommitSha">
+export type WatchKey = Brand<string, "WatchKey">
+
+export const WATCH_SOURCE_KINDS = ["session", "linked-worktree", "external-repo", "unknown"] as const
+export type WatchSourceKind = (typeof WATCH_SOURCE_KINDS)[number]
+
+export type PushTarget = {
+  readonly sha: CommitSha
+  readonly branch: string
+  readonly repo: string
+  readonly repoUrl: string
+  readonly directory: string | null
+  readonly sourceKind: WatchSourceKind
+}
 
 export const RUN_STATUSES = ["queued", "in_progress", "completed"] as const
 export type RunStatus = (typeof RUN_STATUSES)[number]
@@ -73,6 +86,9 @@ export type PrInfo = {
 export type CiReport = {
   readonly sha: CommitSha
   readonly branch: string
+  readonly repo: string
+  readonly sourceKind: WatchSourceKind
+  readonly directory: string | null
   readonly runs: readonly WorkflowRun[]
   readonly failedLogs: readonly FailedRunLog[]
   readonly pr: PrInfo | null
@@ -88,6 +104,10 @@ export type WatchPhase =
 export type Watch = {
   readonly sha: CommitSha
   readonly branch: string
+  readonly repo: string
+  readonly repoUrl: string
+  readonly directory: string | null
+  readonly sourceKind: WatchSourceKind
   readonly startedAt: number
   readonly phase: WatchPhase
 }
@@ -95,6 +115,8 @@ export type Watch = {
 export type SessionState = {
   readonly sessionID: SessionId
   readonly enabled: boolean
+  readonly watches: readonly Watch[]
+  /** @deprecated Compatibility alias for the most recently started watch. */
   readonly watch: Watch | null
   /** Directory of the project that claimed the session; null until an instance-scoped path provides it (never undone afterward). */
   readonly directory: string | null

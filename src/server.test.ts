@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test"
+import { z } from "zod"
 import { DashboardServer, isAllowedHost, type SessionControl } from "./server.ts"
-import type { SessionId, SessionState } from "./types.ts"
+import type { CommitSha, SessionId, SessionState, Watch } from "./types.ts"
 
 describe("isAllowedHost", () => {
   it.each([
@@ -18,9 +19,28 @@ describe("isAllowedHost", () => {
 })
 
 const TEST_PORT = 45917
+const StateResponseSchema = z.array(
+  z.object({
+    watches: z.array(z.object({ branch: z.string() })),
+    watch: z.object({ branch: z.string() }).nullable(),
+  }),
+)
 
 function sessionState(id: string, enabled: boolean): SessionState {
-  return { sessionID: id as SessionId, enabled, watch: null, directory: null }
+  return { sessionID: id as SessionId, enabled, watches: [], watch: null, directory: null }
+}
+
+function waitingWatch(branch: string): Watch {
+  return {
+    sha: "abcdef1234567890" as CommitSha,
+    branch,
+    repo: "github.com/o/r",
+    repoUrl: "https://github.com/o/r",
+    directory: `/repo-${branch}`,
+    sourceKind: "linked-worktree",
+    startedAt: 1,
+    phase: { kind: "waiting" },
+  }
 }
 
 function fakeControl(): { control: SessionControl; calls: Array<[string, boolean]> } {
@@ -64,6 +84,7 @@ describe("DashboardServer control routes", () => {
     expect(await response.json()).toEqual({
       sessionID: "ses_abc",
       enabled: true,
+      watches: [],
       watch: null,
       directory: null,
     })
@@ -83,6 +104,7 @@ describe("DashboardServer control routes", () => {
     expect(await response.json()).toEqual({
       sessionID: "ses_abc",
       enabled: false,
+      watches: [],
       watch: null,
       directory: null,
     })
@@ -131,6 +153,49 @@ describe("DashboardServer control routes", () => {
 
     expect(response.status).toBe(200)
     expect(response.headers.get("x-ci-loop")).toBe("dashboard")
+  })
+
+  it("GET /state carries every watch plus the deprecated latest-watch alias", async () => {
+    const base = startServer()
+    const first = waitingWatch("feature-a")
+    const second = { ...waitingWatch("feature-b"), startedAt: 2 }
+    server?.broadcast([
+      {
+        sessionID: "ses_multi" as SessionId,
+        enabled: true,
+        watches: [first, second],
+        watch: second,
+        directory: "/repo",
+      },
+    ])
+
+    const response = await fetch(`${base}/state`)
+    const state = StateResponseSchema.parse(await response.json())
+
+    expect(state[0]?.watches.map((watch) => watch.branch)).toEqual(["feature-a", "feature-b"])
+    expect(state[0]?.watch?.branch).toBe("feature-b")
+  })
+
+  it("SSE snapshots carry the watches collection", async () => {
+    const base = startServer()
+    const watch = waitingWatch("feature")
+    server?.broadcast([
+      {
+        sessionID: "ses_sse" as SessionId,
+        enabled: true,
+        watches: [watch],
+        watch,
+        directory: "/repo",
+      },
+    ])
+
+    const response = await fetch(`${base}/events`)
+    const reader = response.body?.getReader()
+    const chunk = await reader?.read()
+    await reader?.cancel()
+
+    expect(new TextDecoder().decode(chunk?.value)).toContain('"watches"')
+    expect(new TextDecoder().decode(chunk?.value)).toContain('"feature"')
   })
 
   it("still rejects non-loopback host headers on control routes", async () => {

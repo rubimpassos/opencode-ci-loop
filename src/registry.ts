@@ -1,5 +1,13 @@
 import type { GhClient } from "./gh.ts"
-import type { CommitSha, PluginConfig, SessionId, SessionState, Watch, WatchPhase } from "./types.ts"
+import type {
+  PluginConfig,
+  PushTarget,
+  SessionId,
+  SessionState,
+  Watch,
+  WatchKey,
+  WatchPhase,
+} from "./types.ts"
 
 /** Subset of GhClient that a watch needs. Injected per push (each project has its own cwd). */
 export type CiGh = Pick<GhClient, "listRuns" | "buildReport">
@@ -25,15 +33,23 @@ export type RegistryEvents = {
   /** Snapshot completo mudou (dashboard SSE). */
   readonly onChange: (sessions: readonly SessionState[]) => void
   /** Phase transition of a watch (toasts). */
-  readonly onPhase: (sessionID: SessionId, watch: Watch) => Promise<void>
+  readonly onPhase: (sessionID: SessionId, watch: Watch, signal: AbortSignal) => Promise<void>
+}
+
+type WatchSlot = {
+  watch: Watch
+  readonly controller: AbortController
 }
 
 type MutableSession = {
   sessionID: SessionId
   enabled: boolean
-  watch: Watch | null
-  controller: AbortController | null
+  readonly watches: Map<WatchKey, WatchSlot>
   directory: string | null
+}
+
+export function watchKey(repo: string, branch: string): WatchKey {
+  return `${repo}\0refs/heads/${branch}` as WatchKey
 }
 
 export class WatchRegistry {
@@ -46,22 +62,19 @@ export class WatchRegistry {
   ) {}
 
   snapshot(): readonly SessionState[] {
-    return [...this.sessions.values()].map(({ sessionID, enabled, watch, directory }) => ({
-      sessionID,
-      enabled,
-      watch,
-      directory,
-    }))
+    return [...this.sessions.values()].map((session) => this.state(session))
   }
 
   /** Pure read: does NOT create the session (unlike `session`/`isEnabled`); defaults to `autoWatch` if never seen. */
   sessionView(sessionID: SessionId): SessionState {
     const existing = this.sessions.get(sessionID)
+    if (existing) return this.state(existing)
     return {
       sessionID,
-      enabled: existing?.enabled ?? this.config.autoWatch,
-      watch: existing?.watch ?? null,
-      directory: existing?.directory ?? null,
+      enabled: this.config.autoWatch,
+      watches: [],
+      watch: null,
+      directory: null,
     }
   }
 
@@ -72,93 +85,121 @@ export class WatchRegistry {
   setEnabled(sessionID: SessionId, enabled: boolean, directory?: string): void {
     const session = this.session(sessionID, directory)
     session.enabled = enabled
-    if (!enabled) {
-      this.stopWatch(session)
-    }
+    if (!enabled) this.stopAll(session)
     this.events.onChange(this.snapshot())
   }
 
   remove(sessionID: SessionId): void {
     const session = this.sessions.get(sessionID)
-    if (session) {
-      this.stopWatch(session)
-      this.sessions.delete(sessionID)
-      this.events.onChange(this.snapshot())
-    }
+    if (!session) return
+    this.stopAll(session)
+    this.sessions.delete(sessionID)
+    this.events.onChange(this.snapshot())
   }
 
-  /** Starts (or replaces) the session's CI watch for the given commit. */
-  async startWatch(
-    sessionID: SessionId,
-    sha: CommitSha,
-    branch: string,
-    gh: CiGh,
-    directory?: string,
-  ): Promise<void> {
+  async startWatch(sessionID: SessionId, target: PushTarget, gh: CiGh, directory?: string): Promise<void> {
     const session = this.session(sessionID, directory)
-    this.stopWatch(session)
+    const key = watchKey(target.repo, target.branch)
+    this.stopKey(session, key)
     const controller = new AbortController()
-    session.controller = controller
-    this.setPhase(session, sha, branch, { kind: "waiting" })
+    const watch: Watch = {
+      ...target,
+      startedAt: Date.now(),
+      phase: { kind: "waiting" },
+    }
+    session.watches.set(key, { watch, controller })
+    this.publish(session, key, controller)
     try {
-      await this.watchLoop(session, sha, branch, gh, controller.signal)
+      await this.watchLoop(session, key, target, gh, controller)
     } catch (error) {
-      if (!controller.signal.aborted) {
-        const message = error instanceof Error ? error.message : String(error)
-        this.setPhase(session, sha, branch, { kind: "error", message })
-      }
+      if (!this.isCurrent(session, key, controller)) return
+      const message = error instanceof Error ? error.message : String(error)
+      this.setPhase(session, key, controller, { kind: "error", message })
     }
   }
 
   dispose(): void {
-    for (const session of this.sessions.values()) {
-      this.stopWatch(session)
-    }
+    for (const session of this.sessions.values()) this.stopAll(session)
   }
 
   private async watchLoop(
     session: MutableSession,
-    sha: CommitSha,
-    branch: string,
+    key: WatchKey,
+    target: PushTarget,
     gh: CiGh,
-    signal: AbortSignal,
+    controller: AbortController,
   ): Promise<void> {
+    const { signal } = controller
     const deadline = Date.now() + this.config.timeoutMs
     await this.sleep(this.config.initialDelayMs, signal)
 
-    while (!signal.aborted && Date.now() < deadline) {
-      const runs = await gh.listRuns(sha)
-      if (signal.aborted) return
-
+    while (this.isCurrent(session, key, controller) && Date.now() < deadline) {
+      const runs = await gh.listRuns(target.sha, target.branch)
+      if (!this.isCurrent(session, key, controller)) return
       if (runs.length > 0) {
-        const allDone = runs.every((run) => run.status === "completed")
-        if (allDone) {
-          const report = await gh.buildReport(sha, branch, this.config.failLogLines)
-          if (signal.aborted) return
-          this.setPhase(session, sha, branch, { kind: "done", report })
+        if (runs.every((run) => run.status === "completed")) {
+          const report = await gh.buildReport(target, this.config.failLogLines)
+          if (!this.isCurrent(session, key, controller)) return
+          this.setPhase(session, key, controller, { kind: "done", report })
           return
         }
-        this.setPhase(session, sha, branch, { kind: "running", runs })
+        this.setPhase(session, key, controller, { kind: "running", runs })
       }
       await this.sleep(this.config.pollIntervalMs, signal)
     }
 
-    if (!signal.aborted) {
-      const runs = session.watch?.phase.kind === "running" ? session.watch.phase.runs : []
-      this.setPhase(session, sha, branch, { kind: "timed-out", runs })
-    }
+    if (!this.isCurrent(session, key, controller)) return
+    const phase = session.watches.get(key)?.watch.phase
+    const runs = phase?.kind === "running" ? phase.runs : []
+    this.setPhase(session, key, controller, { kind: "timed-out", runs })
   }
 
-  private setPhase(session: MutableSession, sha: CommitSha, branch: string, phase: WatchPhase): void {
-    const startedAt = session.watch?.sha === sha ? session.watch.startedAt : Date.now()
-    session.watch = { sha, branch, startedAt, phase }
+  private setPhase(
+    session: MutableSession,
+    key: WatchKey,
+    controller: AbortController,
+    phase: WatchPhase,
+  ): void {
+    if (!this.isCurrent(session, key, controller)) return
+    const slot = session.watches.get(key)
+    if (!slot) return
+    slot.watch = { ...slot.watch, phase }
+    this.publish(session, key, controller)
+  }
+
+  private publish(session: MutableSession, key: WatchKey, controller: AbortController): void {
+    if (!this.isCurrent(session, key, controller)) return
+    const watch = session.watches.get(key)?.watch
+    if (!watch) return
     this.events.onChange(this.snapshot())
-    void this.events.onPhase(session.sessionID, session.watch)
+    void this.events.onPhase(session.sessionID, watch, controller.signal)
   }
 
-  private stopWatch(session: MutableSession): void {
-    session.controller?.abort()
-    session.controller = null
+  private isCurrent(session: MutableSession, key: WatchKey, controller: AbortController): boolean {
+    return session.watches.get(key)?.controller === controller && !controller.signal.aborted
+  }
+
+  private stopKey(session: MutableSession, key: WatchKey): void {
+    session.watches.get(key)?.controller.abort()
+    session.watches.delete(key)
+  }
+
+  private stopAll(session: MutableSession): void {
+    for (const slot of session.watches.values()) slot.controller.abort()
+    session.watches.clear()
+  }
+
+  private state(session: MutableSession): SessionState {
+    const watches = [...session.watches.values()]
+      .map((slot) => slot.watch)
+      .sort((left, right) => left.startedAt - right.startedAt)
+    return {
+      sessionID: session.sessionID,
+      enabled: session.enabled,
+      watches,
+      watch: watches.at(-1) ?? null,
+      directory: session.directory,
+    }
   }
 
   private session(sessionID: SessionId, directory?: string): MutableSession {
@@ -167,8 +208,7 @@ export class WatchRegistry {
       session = {
         sessionID,
         enabled: this.config.autoWatch,
-        watch: null,
-        controller: null,
+        watches: new Map(),
         directory: directory ?? null,
       }
       this.sessions.set(sessionID, session)

@@ -39,6 +39,7 @@ sequenceDiagram
 
 - **Push detection** — `tool.execute.after` hook catches the agent's `git push` (ignores `--dry-run` and rejected pushes)
 - **CI watch** — polls `gh run list --commit <sha>` until all workflows complete
+- **Multi-worktree / multi-repo** — watches every branch pushed from linked worktrees or external repos in parallel, labeling the source (session branch vs. worktree vs. external repo) without dropping the session's earlier watches
 - **Context injection** — green CI becomes a noop, red CI becomes a fix instruction with the log tail of every failed run
 - **PR readiness** — with an open PR on the branch, the report says whether it can merge and lists the exact blockers
 - **Per-session toggle** — `ci_watch` tool (`enable` / `disable` / `status`); tell the agent "turn off the ci loop" anytime

@@ -1,7 +1,15 @@
 import { type Plugin, tool } from "@opencode-ai/plugin"
 import { bunExec, GhClient } from "./gh.ts"
-import { WatchRegistry } from "./registry.ts"
-import { isReportClean, prReadiness, renderPromptReport, renderWatchNotice, summarizeRuns } from "./render.ts"
+import { WatchRegistry, watchKey } from "./registry.ts"
+import {
+  isReportClean,
+  prReadiness,
+  renderPromptReport,
+  renderWatchNotice,
+  sourceLabel,
+  summarizeRuns,
+} from "./render.ts"
+import { resolvePushTargets } from "./resolve.ts"
 import { DashboardServer } from "./server.ts"
 import { assertNever, type PluginConfig, PluginConfigSchema, type SessionId, type Watch } from "./types.ts"
 
@@ -25,6 +33,7 @@ type SharedCiLoop = {
   readonly dashboard: DashboardServer
   refs: number
   client: OpencodeClient
+  readonly notifications: Set<string>
 }
 
 const SHARED_KEY = Symbol.for("opencode-ci-loop.shared")
@@ -51,16 +60,16 @@ export function acquireShared(config: PluginConfig, client: OpencodeClient): Sha
   }
 
   const dashboard = new DashboardServer(config.dashboard)
-  const lastToastedPhase = new Map<SessionId, string>()
+  const notifications = new Set<string>()
 
   const registry = new WatchRegistry(config, {
     onChange: (sessions) => dashboard.broadcast(sessions),
-    onPhase: async (sessionID, watch) => {
-      await notifyPhase(shared.client, lastToastedPhase, sessionID, watch)
+    onPhase: async (sessionID, watch, signal) => {
+      await notifyPhase(shared.client, shared.notifications, sessionID, watch, signal)
     },
   })
 
-  const shared: SharedCiLoop = { registry, dashboard, refs: 1, client }
+  const shared: SharedCiLoop = { registry, dashboard, refs: 1, client, notifications }
   dashboard.setControl({
     getSession: (id) => registry.sessionView(id as SessionId),
     setEnabled: (id, enabled) => {
@@ -107,31 +116,36 @@ export async function resolveSessionModel(
 
 export async function notifyPhase(
   client: OpencodeClient,
-  lastToastedPhase: Map<SessionId, string>,
+  notifications: Set<string>,
   sessionID: SessionId,
   watch: Watch,
+  signal?: AbortSignal,
 ): Promise<void> {
+  if (signal?.aborted) return
   const phase = watch.phase
-  const fingerprint = phase.kind === "running" ? `running:${summarizeRuns(phase.runs)}` : phase.kind
-  if (lastToastedPhase.get(sessionID) === fingerprint) return
-  lastToastedPhase.set(sessionID, fingerprint)
+  const phaseFingerprint = phase.kind === "running" ? `running:${summarizeRuns(phase.runs)}` : phase.kind
+  const fingerprint = `${sessionID}\0${watchKey(watch.repo, watch.branch)}\0${watch.sha}\0${phaseFingerprint}`
+  if (notifications.has(fingerprint)) return
+  notifications.add(fingerprint)
+  const context = `${watch.repo} · ${watch.branch} — ${sourceLabel(watch.sourceKind, watch.directory)}`
 
   const toast = async (message: string, variant: "info" | "success" | "warning" | "error") => {
+    if (signal?.aborted) return
     await client.tui.showToast({ body: { title: "CI Loop", message, variant } })
   }
 
   switch (phase.kind) {
     case "waiting":
-      await toast("Waiting for CI to start…", "info")
+      await toast(`Waiting for CI to start… · ${context}`, "info")
       return
     case "running":
-      await toast(`CI: ${summarizeRuns(phase.runs)}`, "info")
+      await toast(`CI: ${summarizeRuns(phase.runs)} · ${context}`, "info")
       return
     case "timed-out":
-      await toast("Timed out waiting for CI", "warning")
+      await toast(`Timed out waiting for CI · ${context}`, "warning")
       return
     case "error":
-      await toast(`CI watch failed: ${phase.message}`, "error")
+      await toast(`CI watch failed: ${phase.message} · ${context}`, "error")
       return
     case "done": {
       const clean = isReportClean(phase.report)
@@ -143,8 +157,10 @@ export async function notifyPhase(
           : `blocked: ${readiness.blockers.length} issue${readiness.blockers.length === 1 ? "" : "s"}`
         message += ` · PR #${phase.report.pr.number} ${prStatus}`
       }
-      await toast(message, clean ? "success" : "error")
+      await toast(`${message} · ${context}`, clean ? "success" : "error")
+      if (signal?.aborted) return
       const model = await resolveSessionModel(client, sessionID)
+      if (signal?.aborted) return
       await client.session.prompt({
         path: { id: sessionID },
         body: { ...(model && { model }), parts: [{ type: "text", text: renderPromptReport(phase.report) }] },
@@ -156,9 +172,15 @@ export async function notifyPhase(
   }
 }
 
+export function clearSessionNotifications(notifications: Set<string>, sessionID: SessionId): void {
+  const prefix = `${sessionID}\0`
+  for (const fingerprint of notifications) {
+    if (fingerprint.startsWith(prefix)) notifications.delete(fingerprint)
+  }
+}
+
 export const CiLoopPlugin: Plugin = async ({ client, directory }, options) => {
   const config = PluginConfigSchema.parse(options ?? {})
-  const gh = new GhClient(bunExec, directory)
   const shared = acquireShared(config, client)
   const { registry, dashboard } = shared
 
@@ -172,14 +194,23 @@ export const CiLoopPlugin: Plugin = async ({ client, directory }, options) => {
       const sessionID = input.sessionID as SessionId
       if (!registry.isEnabled(sessionID, directory)) return
 
-      const [sha, branch] = await Promise.all([gh.headSha(), gh.currentBranch()])
-      void registry.startWatch(sessionID, sha, branch, gh, directory)
-      output.output += renderWatchNotice(sha, branch)
+      const targets = await resolvePushTargets(output.output, args.data.command, input.args, {
+        exec: bunExec,
+        sessionDir: directory,
+      })
+      if (targets.length === 0) return
+      for (const target of targets) {
+        const gh = new GhClient(bunExec, target.directory ?? directory, target.repoUrl)
+        void registry.startWatch(sessionID, target, gh, directory)
+      }
+      output.output += renderWatchNotice(targets)
     },
 
     event: async ({ event }) => {
       if (event.type === "session.deleted") {
-        registry.remove(event.properties.info.id as SessionId)
+        const sessionID = event.properties.info.id as SessionId
+        registry.remove(sessionID)
+        clearSessionNotifications(shared.notifications, sessionID)
       }
     },
 
@@ -207,7 +238,7 @@ export const CiLoopPlugin: Plugin = async ({ client, directory }, options) => {
               return "CI loop DISABLED for this session (active watch cancelled)."
             case "status": {
               const enabled = registry.isEnabled(sessionID, directory)
-              const watch = registry.snapshot().find((s) => s.sessionID === sessionID)?.watch
+              const watch = registry.sessionView(sessionID).watch
               const phase = watch
                 ? `; current watch: ${watch.phase.kind} (${watch.branch}@${watch.sha.slice(0, 8)})`
                 : ""

@@ -26,7 +26,8 @@ export const DASHBOARD_HTML = `<!doctype html>
   .badge { border-radius: 999px; padding: 1px 10px; font-size: 12px; border: 1px solid var(--border); }
   .badge.on { color: var(--green); border-color: var(--green); }
   .badge.off { color: var(--muted); }
-  .watch { margin-top: 10px; }
+  .watch { margin-top: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; }
+  .watch + .watch { margin-top: 8px; }
   .watch-meta { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
   .phase { font-weight: 600; }
   .phase.waiting, .phase.running { color: var(--blue); }
@@ -46,6 +47,9 @@ export const DASHBOARD_HTML = `<!doctype html>
   pre { background: #010409; border: 1px solid var(--border); border-radius: 6px; padding: 10px;
     overflow-x: auto; font-size: 12px; max-height: 320px; }
   details summary { cursor: pointer; color: var(--red); margin-top: 8px; }
+  .pr { border-top: 1px solid var(--border); margin-top: 8px; padding-top: 8px; font-size: 12px; }
+  .pr a { color: var(--blue); text-decoration: none; }
+  .pr a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -62,6 +66,20 @@ function runRow(run) {
   return '<div class="run">' + icon + '<a href="' + esc(run.url) + '" target="_blank">'
     + esc(run.workflowName) + "</a><span class=\\"state " + esc(state) + '">' + esc(state) + "</span></div>";
 }
+function sourceLabel(watch) {
+  if (watch.sourceKind === "session") return "current session branch";
+  if (watch.sourceKind === "linked-worktree") return "linked worktree at " + (watch.directory || "unknown directory");
+  if (watch.sourceKind === "external-repo") return "external repo at " + (watch.directory || "unknown directory");
+  return "source directory unknown";
+}
+function prView(report) {
+  const pr = report.pr;
+  if (!pr) return "";
+  const details = [pr.state, pr.isDraft ? "draft" : "ready for review", pr.mergeable.toLowerCase()];
+  if (pr.reviewDecision) details.push(pr.reviewDecision.toLowerCase().replaceAll("_", " "));
+  return '<div class="pr">PR <a href="' + esc(pr.url) + '" target="_blank">#' + esc(pr.number)
+    + " — " + esc(pr.title) + "</a><br>" + esc(details.join(" · ")) + "</div>";
+}
 function phaseView(watch) {
   const phase = watch.phase;
   if (phase.kind === "waiting") return '<div class="phase waiting">Waiting for CI to start…</div>';
@@ -76,11 +94,11 @@ function phaseView(watch) {
   for (const failed of phase.report.failedLogs) {
     html += "<details><summary>" + esc(failed.runName) + "</summary><pre>" + esc(failed.logTail) + "</pre></details>";
   }
-  return html;
+  return html + prView(phase.report);
 }
 function render(sessions) {
   const app = document.getElementById("app");
-  const active = sessions.filter((s) => s.watch || s.enabled);
+  const active = sessions.filter((s) => (s.watches && s.watches.length > 0) || s.watch || s.enabled);
   if (active.length === 0) {
     app.innerHTML = '<div class="empty">Waiting for a push with CI…</div>';
     return;
@@ -93,9 +111,11 @@ function render(sessions) {
       : "";
     let html = '<div class="session"><div class="session-head"><span class="session-id">'
       + project + esc(session.sessionID) + "</span>" + badge + "</div>";
-    if (session.watch) {
-      html += '<div class="watch"><div class="watch-meta">' + esc(session.watch.branch) + " @ "
-        + esc(session.watch.sha.slice(0, 8)) + "</div>" + phaseView(session.watch) + "</div>";
+    const watches = Array.isArray(session.watches) ? session.watches : (session.watch ? [session.watch] : []);
+    for (const watch of watches) {
+      html += '<div class="watch"><div class="watch-meta">' + esc(watch.repo) + " · " + esc(watch.branch)
+        + " · " + esc(sourceLabel(watch)) + " · " + esc(watch.sha.slice(0, 8)) + "</div>"
+        + phaseView(watch) + "</div>";
     }
     return html + "</div>";
   }).join("");
