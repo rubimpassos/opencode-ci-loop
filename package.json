@@ -1,6 +1,6 @@
 {
   "name": "opencode-ci-loop",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "opencode plugin: CI validation loop — watches GitHub Actions after a push, injects results into the session, with per-session toggle and a live SSE dashboard",
   "module": "index.ts",
   "main": "index.ts",
