@@ -102,6 +102,8 @@ function makePr(overrides: Partial<PrInfo> = {}): PrInfo {
     mergeable: "MERGEABLE",
     mergeStateStatus: "CLEAN",
     reviewDecision: "APPROVED",
+    commitCount: 3,
+    checks: [],
     ...overrides,
   }
 }
@@ -139,6 +141,7 @@ function doneWatch(runsSucceed: boolean, pr: PrInfo | null = null): Watch {
           : [],
         failedLogs: [],
         pr,
+        ruleFailures: [],
       },
     },
   }

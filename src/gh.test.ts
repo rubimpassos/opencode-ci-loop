@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { type Exec, type ExecResult, GhClient, GhError, parseRunList } from "./gh.ts"
+import { type Exec, type ExecResult, GhClient, GhError, parsePrChecks, parseRunList, repoRef } from "./gh.ts"
 import type { CommitSha, PushTarget } from "./types.ts"
 
 const RUN_LIST_JSON = JSON.stringify([
@@ -32,6 +32,22 @@ const PR_JSON = JSON.stringify({
   mergeable: "MERGEABLE",
   mergeStateStatus: "CLEAN",
   reviewDecision: "APPROVED",
+  statusCheckRollup: [
+    {
+      __typename: "CheckRun",
+      name: "build",
+      status: "COMPLETED",
+      conclusion: "SUCCESS",
+      detailsUrl: "https://x/ci",
+      workflowName: "CI",
+    },
+    {
+      __typename: "StatusContext",
+      context: "ci/jenkins",
+      state: "FAILURE",
+      targetUrl: "https://x/j",
+    },
+  ],
 })
 
 describe("parseRunList", () => {
@@ -42,6 +58,34 @@ describe("parseRunList", () => {
     expect(runs[0]?.conclusion).toBe("failure")
     expect(runs[1]?.conclusion).toBeNull()
     expect(runs[1]?.status).toBe("in_progress")
+  })
+})
+
+describe("repoRef", () => {
+  it("parses https and scp-style remote URLs", () => {
+    expect(repoRef("https://github.com/o/r")).toEqual({ host: "github.com", slug: "o/r" })
+    expect(repoRef("https://ghe.example.com/acme/widget.git")).toEqual({
+      host: "ghe.example.com",
+      slug: "acme/widget",
+    })
+    expect(repoRef("git@github.com:o/r.git")).toEqual({ host: "github.com", slug: "o/r" })
+  })
+
+  it("rejects URLs that are not owner/repo", () => {
+    expect(repoRef("https://github.com/only-owner")).toBeNull()
+    expect(repoRef("not a url")).toBeNull()
+  })
+})
+
+describe("parsePrChecks", () => {
+  it("marks in-progress check runs as pending and skips unknown rollup entries", () => {
+    const checks = parsePrChecks([
+      { __typename: "CheckRun", name: "build", status: "IN_PROGRESS", conclusion: "", workflowName: "CI" },
+      { __typename: "SomethingElse" },
+    ])
+    expect(checks).toEqual([
+      { name: "build", workflowName: "CI", status: "pending", state: "IN_PROGRESS", url: null },
+    ])
   })
 })
 
@@ -129,11 +173,12 @@ describe("GhClient", () => {
     expect(runs.map((run) => run.branch)).toEqual(["feat/x", "feat/x"])
   })
 
-  it("finds the open PR for a branch", async () => {
+  it("finds the open PR for a branch with normalized checks and commit count", async () => {
     const client = new GhClient(
       scriptedExec({
         ...GIT_REMOTE_SCRIPT,
         "gh pr view": PR_JSON,
+        "gh api --hostname github.com repos/o/r/pulls/12": "3\n",
       }),
       "/repo",
     )
@@ -149,7 +194,26 @@ describe("GhClient", () => {
       mergeable: "MERGEABLE",
       mergeStateStatus: "CLEAN",
       reviewDecision: "APPROVED",
+      commitCount: 3,
+      checks: [
+        { name: "build", workflowName: "CI", status: "passing", state: "SUCCESS", url: "https://x/ci" },
+        { name: "ci/jenkins", workflowName: null, status: "failing", state: "FAILURE", url: "https://x/j" },
+      ],
     })
+  })
+
+  it("degrades gracefully when the commit count API is unavailable", async () => {
+    const client = new GhClient(
+      scriptedExec({
+        ...GIT_REMOTE_SCRIPT,
+        "gh pr view": PR_JSON,
+      }),
+      "/repo",
+    )
+
+    const pr = await client.findPrForBranch("feat/x")
+
+    expect(pr?.commitCount).toBeNull()
   })
 
   it("returns null when no PR exists for the branch", async () => {
@@ -199,6 +263,52 @@ describe("GhClient", () => {
     expect(report.repo).toBe("github.com/o/r")
     expect(report.sourceKind).toBe("linked-worktree")
     expect(report.directory).toBe("/repo-feature")
+    expect(report.ruleFailures).toEqual([])
+  })
+
+  it("names the failing ruleset rules when the PR merge is blocked", async () => {
+    const exec = scriptedExec({
+      "gh run list": RUN_LIST_JSON.replace('"in_progress"', '"completed"').replace('""', '"success"'),
+      "gh run view": "BOOM\n",
+      "gh pr view": PR_JSON.replace('"CLEAN"', '"BLOCKED"'),
+      "gh api --hostname github.com repos/o/r/pulls/12": "3\n",
+      "gh api --hostname github.com repos/o/r/rulesets/rule-suites?": JSON.stringify([
+        { id: 55, after_sha: "abc123", result: "fail" },
+        { id: 44, after_sha: "older", result: "fail" },
+      ]),
+      "gh api --hostname github.com repos/o/r/rulesets/rule-suites/55": JSON.stringify({
+        id: 55,
+        rule_evaluations: [
+          {
+            rule_type: "commit_message_pattern",
+            result: "fail",
+            details: "Commit message must match ^(feat|fix):",
+          },
+          { rule_type: "required_linear_history", result: "pass", details: null },
+        ],
+      }),
+    })
+    const client = new GhClient(exec, "/repo", target.repoUrl)
+
+    const report = await client.buildReport(target, 2)
+
+    expect(report.ruleFailures).toEqual([
+      { ruleType: "commit_message_pattern", message: "Commit message must match ^(feat|fix):" },
+    ])
+  })
+
+  it("returns no rule failures when the rule-suites API is inaccessible", async () => {
+    const exec = scriptedExec({
+      "gh run list": RUN_LIST_JSON.replace('"in_progress"', '"completed"').replace('""', '"success"'),
+      "gh run view": "BOOM\n",
+      "gh pr view": PR_JSON.replace('"CLEAN"', '"BLOCKED"'),
+    })
+    const client = new GhClient(exec, "/repo", target.repoUrl)
+
+    const report = await client.buildReport(target, 2)
+
+    expect(report.pr?.mergeStateStatus).toBe("BLOCKED")
+    expect(report.ruleFailures).toEqual([])
   })
 
   it("throws GhError with command context when gh fails", async () => {

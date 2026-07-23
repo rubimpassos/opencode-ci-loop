@@ -25,6 +25,8 @@ function makePr(overrides: Partial<PrInfo> = {}): PrInfo {
     mergeable: "MERGEABLE",
     mergeStateStatus: "CLEAN",
     reviewDecision: "APPROVED",
+    commitCount: 3,
+    checks: [],
     ...overrides,
   }
 }
@@ -33,6 +35,7 @@ function makeReport(
   runs: readonly WorkflowRun[],
   failedLogs: CiReport["failedLogs"] = [],
   pr: PrInfo | null = null,
+  ruleFailures: CiReport["ruleFailures"] = [],
 ): CiReport {
   return {
     sha: "abcdef1234567890" as CommitSha,
@@ -43,6 +46,7 @@ function makeReport(
     runs,
     failedLogs,
     pr,
+    ruleFailures,
   }
 }
 
@@ -90,13 +94,14 @@ describe("isReportClean", () => {
 
 describe("prReadiness", () => {
   it("is ready when the PR and CI are clean", () => {
-    expect(prReadiness(makePr(), true)).toEqual({ ready: true, blockers: [] })
+    expect(prReadiness(makePr(), true)).toEqual({ ready: true, blockers: [], warnings: [] })
   })
 
   it("blocks draft PRs", () => {
     expect(prReadiness(makePr({ isDraft: true }), true)).toEqual({
       ready: false,
       blockers: ["PR is a draft"],
+      warnings: [],
     })
   })
 
@@ -104,6 +109,7 @@ describe("prReadiness", () => {
     expect(prReadiness(makePr({ mergeable: "CONFLICTING" }), true)).toEqual({
       ready: false,
       blockers: ["Merge conflicts with the base branch"],
+      warnings: [],
     })
   })
 
@@ -111,6 +117,7 @@ describe("prReadiness", () => {
     expect(prReadiness(makePr({ reviewDecision: "CHANGES_REQUESTED" }), true)).toEqual({
       ready: false,
       blockers: ["Changes requested in review"],
+      warnings: [],
     })
   })
 
@@ -118,6 +125,7 @@ describe("prReadiness", () => {
     expect(prReadiness(makePr(), false)).toEqual({
       ready: false,
       blockers: ["CI checks failing"],
+      warnings: [],
     })
   })
 
@@ -125,10 +133,24 @@ describe("prReadiness", () => {
     expect(prReadiness(makePr({ mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }), true)).toEqual({
       ready: false,
       blockers: ["GitHub hasn't computed mergeability yet"],
+      warnings: [],
     })
     expect(prReadiness(makePr({ isDraft: true, mergeable: "UNKNOWN" }), true).blockers).toEqual([
       "PR is a draft",
     ])
+  })
+
+  it("warns when the PR exceeds GitHub's 100-commit rebase merge cap without blocking readiness", () => {
+    const readiness = prReadiness(makePr({ commitCount: 123 }), true)
+    expect(readiness.ready).toBe(true)
+    expect(readiness.warnings).toEqual([
+      "Rebase merge unavailable: PR has 123 commits (GitHub caps rebase merges at 100); use squash or merge commit",
+    ])
+  })
+
+  it("does not warn at exactly 100 commits or when the count is unknown", () => {
+    expect(prReadiness(makePr({ commitCount: 100 }), true).warnings).toEqual([])
+    expect(prReadiness(makePr({ commitCount: null }), true).warnings).toEqual([])
   })
 })
 
@@ -157,6 +179,45 @@ describe("renderPromptReport", () => {
     expect(text).toContain("🚧 Not ready to merge:")
     expect(text).toContain("- PR is a draft")
     expect(text).not.toContain("No action needed")
+  })
+
+  it("names the exact ruleset rules that block the merge", () => {
+    const text = renderPromptReport(
+      makeReport([makeRun({})], [], makePr({ mergeStateStatus: "BLOCKED" }), [
+        { ruleType: "commit_message_pattern", message: "Commit message must match conventional commits" },
+        { ruleType: "required_signatures", message: null },
+      ]),
+    )
+
+    expect(text).toContain("Failing rules (GitHub ruleset evaluation for this branch):")
+    expect(text).toContain("- `commit_message_pattern` — Commit message must match conventional commits")
+    expect(text).toContain("- `required_signatures`")
+  })
+
+  it("warns about the rebase merge commit cap even when the PR is ready", () => {
+    const text = renderPromptReport(makeReport([makeRun({})], [], makePr({ commitCount: 150 })))
+
+    expect(text).toContain("✅ Ready to merge")
+    expect(text).toContain("⚠️ Rebase merge unavailable: PR has 150 commits")
+  })
+
+  it("lists failing non-Actions checks without duplicating listed workflow runs", () => {
+    const pr = makePr({
+      mergeStateStatus: "UNSTABLE",
+      checks: [
+        { name: "build", workflowName: "CI", status: "failing", state: "FAILURE", url: "https://x/ci" },
+        { name: "vercel", workflowName: null, status: "failing", state: "FAILURE", url: "https://x/v" },
+        { name: "jenkins", workflowName: null, status: "pending", state: "PENDING", url: null },
+        { name: "lint", workflowName: null, status: "passing", state: "SUCCESS", url: null },
+      ],
+    })
+    const text = renderPromptReport(makeReport([makeRun({})], [], pr))
+
+    expect(text).toContain("Other checks on the PR (external apps / commit statuses):")
+    expect(text).toContain("- ❌ **vercel** — FAILURE (https://x/v)")
+    expect(text).toContain("- ⏳ **jenkins** — PENDING")
+    expect(text).not.toContain("**build**")
+    expect(text).not.toContain("**lint**")
   })
 
   it("includes failure logs and fix instructions when CI failed", () => {

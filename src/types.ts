@@ -72,6 +72,26 @@ export type PrMergeStateStatus = (typeof PR_MERGE_STATE_STATUSES)[number]
 export const PR_REVIEW_DECISIONS = ["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"] as const
 export type PrReviewDecision = (typeof PR_REVIEW_DECISIONS)[number]
 
+export const PR_CHECK_STATUSES = ["passing", "failing", "pending", "skipped"] as const
+export type PrCheckStatus = (typeof PR_CHECK_STATUSES)[number]
+
+/** Normalized entry of the PR statusCheckRollup (covers non-Actions checks: apps, commit statuses). */
+export type PrCheck = {
+  readonly name: string
+  /** Workflow name for GitHub Actions check runs; null for external apps / status contexts. */
+  readonly workflowName: string | null
+  readonly status: PrCheckStatus
+  /** Raw GraphQL state/conclusion (e.g. "FAILURE", "PENDING") for display. */
+  readonly state: string
+  readonly url: string | null
+}
+
+/** A failed rule evaluation from the GitHub rulesets rule-suites API (names the exact blocking rule). */
+export type RuleFailure = {
+  readonly ruleType: string
+  readonly message: string | null
+}
+
 export type PrInfo = {
   readonly number: number
   readonly title: string
@@ -81,6 +101,9 @@ export type PrInfo = {
   readonly mergeable: PrMergeable
   readonly mergeStateStatus: PrMergeStateStatus
   readonly reviewDecision: PrReviewDecision | null
+  /** Total commits in the PR (REST); null when the lookup fails. GitHub caps rebase merges at 100. */
+  readonly commitCount: number | null
+  readonly checks: readonly PrCheck[]
 }
 
 export type CiReport = {
@@ -92,6 +115,7 @@ export type CiReport = {
   readonly runs: readonly WorkflowRun[]
   readonly failedLogs: readonly FailedRunLog[]
   readonly pr: PrInfo | null
+  readonly ruleFailures: readonly RuleFailure[]
 }
 
 export type WatchPhase =

@@ -49,6 +49,7 @@ function fakeGh(script: readonly (readonly WorkflowRun[])[]): CiGh {
       runs: script[script.length - 1] ?? [],
       failedLogs: [],
       pr: null,
+      ruleFailures: [],
     }),
   }
 }

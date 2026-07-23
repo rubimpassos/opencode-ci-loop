@@ -37,12 +37,21 @@ export function isReportClean(report: CiReport): boolean {
   return report.runs.every((run) => run.conclusion === "success" || run.conclusion === "skipped")
 }
 
+const REBASE_MERGE_COMMIT_LIMIT = 100
+
 export function prReadiness(
   pr: PrInfo,
   ciClean: boolean,
-): { readonly ready: boolean; readonly blockers: readonly string[] } {
+): { readonly ready: boolean; readonly blockers: readonly string[]; readonly warnings: readonly string[] } {
   const blockers: string[] = []
+  const warnings: string[] = []
   let mergeabilityPending = false
+
+  if (pr.commitCount !== null && pr.commitCount > REBASE_MERGE_COMMIT_LIMIT) {
+    warnings.push(
+      `Rebase merge unavailable: PR has ${pr.commitCount} commits (GitHub caps rebase merges at ${REBASE_MERGE_COMMIT_LIMIT}); use squash or merge commit`,
+    )
+  }
 
   if (pr.isDraft) blockers.push("PR is a draft")
 
@@ -107,7 +116,7 @@ export function prReadiness(
   if (mergeabilityPending && blockers.length === 0) {
     blockers.push("GitHub hasn't computed mergeability yet")
   }
-  return { ready: blockers.length === 0, blockers }
+  return { ready: blockers.length === 0, blockers, warnings }
 }
 
 /** Notice appended to `git push` output to stop manual CI polling (the result is injected on its own). */
@@ -138,6 +147,20 @@ export function renderPromptReport(report: CiReport): string {
     lines.push(`- ${runIcon(run)} **${run.workflowName}** — ${run.conclusion ?? run.status} (${run.url})`)
   }
 
+  const runWorkflows = new Set(report.runs.map((run) => run.workflowName))
+  const externalChecks = (report.pr?.checks ?? []).filter(
+    (check) =>
+      (check.status === "failing" || check.status === "pending") &&
+      (check.workflowName === null || !runWorkflows.has(check.workflowName)),
+  )
+  if (externalChecks.length > 0) {
+    lines.push("", "Other checks on the PR (external apps / commit statuses):")
+    for (const check of externalChecks) {
+      const icon = check.status === "failing" ? "❌" : "⏳"
+      lines.push(`- ${icon} **${check.name}** — ${check.state}${check.url ? ` (${check.url})` : ""}`)
+    }
+  }
+
   const readiness = report.pr ? prReadiness(report.pr, ciClean) : null
   if (report.pr && readiness) {
     lines.push(
@@ -153,6 +176,16 @@ export function renderPromptReport(report: CiReport): string {
     } else {
       lines.push("🚧 Not ready to merge:", ...readiness.blockers.map((blocker) => `- ${blocker}`))
     }
+    if (report.ruleFailures.length > 0) {
+      lines.push(
+        "",
+        "Failing rules (GitHub ruleset evaluation for this branch):",
+        ...report.ruleFailures.map(
+          (rule) => `- \`${rule.ruleType}\`${rule.message ? ` — ${rule.message}` : ""}`,
+        ),
+      )
+    }
+    lines.push(...readiness.warnings.map((warning) => `⚠️ ${warning}`))
   }
 
   if (ciClean) {
