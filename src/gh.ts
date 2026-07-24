@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { parseReviewSnapshot, REVIEW_SNAPSHOT_QUERY } from "./gh-review.ts"
 import {
   type CiReport,
   type CommitSha,
@@ -11,6 +12,7 @@ import {
   type PrCheckStatus,
   type PrInfo,
   type PushTarget,
+  type ReviewSnapshot,
   RUN_CONCLUSIONS,
   RUN_STATUSES,
   type RuleFailure,
@@ -335,6 +337,32 @@ export class GhClient {
     return RuleSuiteDetailSchema.parse(safeJson(detail.stdout))
       .rule_evaluations.filter((evaluation) => evaluation.result === "fail")
       .map((evaluation) => ({ ruleType: evaluation.rule_type, message: evaluation.details }))
+  }
+
+  /** Full review state of a PR (threads, reviews, conversation comments) via one GraphQL call. */
+  async reviewSnapshot(prNumber: number): Promise<ReviewSnapshot> {
+    const repoUrl = await this.pushRepoUrl()
+    const ref = repoRef(repoUrl)
+    const [owner, name] = ref?.slug.split("/") ?? []
+    if (ref === null || owner === undefined || name === undefined) {
+      throw new GhError(["gh", "api", "graphql"], 1, `cannot derive owner/name from ${repoUrl}`)
+    }
+    const result = await this.run([
+      "gh",
+      "api",
+      "graphql",
+      "--hostname",
+      ref.host,
+      "-f",
+      `query=${REVIEW_SNAPSHOT_QUERY}`,
+      "-f",
+      `owner=${owner}`,
+      "-f",
+      `name=${name}`,
+      "-F",
+      `number=${prNumber}`,
+    ])
+    return parseReviewSnapshot(result.stdout, prNumber, Date.now())
   }
 
   async buildReport(target: PushTarget, maxLogLines: number): Promise<CiReport> {

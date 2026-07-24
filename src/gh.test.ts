@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import { type Exec, type ExecResult, GhClient, GhError, parsePrChecks, parseRunList, repoRef } from "./gh.ts"
+import { REVIEW_SNAPSHOT_QUERY } from "./gh-review.ts"
 import type { CommitSha, PushTarget } from "./types.ts"
 
 const RUN_LIST_JSON = JSON.stringify([
@@ -314,5 +315,77 @@ describe("GhClient", () => {
   it("throws GhError with command context when gh fails", async () => {
     const client = new GhClient(scriptedExec({}), "/repo")
     expect(client.headSha()).rejects.toBeInstanceOf(GhError)
+  })
+
+  const REVIEW_RESPONSE = JSON.stringify({
+    data: {
+      repository: {
+        pullRequest: {
+          state: "OPEN",
+          merged: false,
+          reviewDecision: null,
+          mergeStateStatus: "CLEAN",
+          reviewThreads: { nodes: [] },
+          reviews: { nodes: [] },
+          comments: { nodes: [] },
+        },
+      },
+    },
+  })
+
+  it("fetches the review snapshot via gh api graphql with the exact locked argv", async () => {
+    const seen: string[][] = []
+    const scripted = scriptedExec({ ...GIT_REMOTE_SCRIPT, "gh api graphql": REVIEW_RESPONSE })
+    const spying: Exec = async (argv, cwd) => {
+      seen.push([...argv])
+      return scripted(argv, cwd)
+    }
+    const client = new GhClient(spying, "/repo")
+    const before = Date.now()
+
+    const snapshot = await client.reviewSnapshot(12)
+
+    expect(seen.find((argv) => argv[1] === "api" && argv[2] === "graphql")).toEqual([
+      "gh",
+      "api",
+      "graphql",
+      "--hostname",
+      "github.com",
+      "-f",
+      `query=${REVIEW_SNAPSHOT_QUERY}`,
+      "-f",
+      "owner=o",
+      "-f",
+      "name=r",
+      "-F",
+      "number=12",
+    ])
+    expect(snapshot.prNumber).toBe(12)
+    expect(snapshot.fetchedAt).toBeGreaterThanOrEqual(before)
+  })
+
+  it("derives hostname, owner and name from the push repo URL (GHE)", async () => {
+    const seen: string[][] = []
+    const scripted = scriptedExec({ "gh api graphql": REVIEW_RESPONSE })
+    const spying: Exec = async (argv, cwd) => {
+      seen.push([...argv])
+      return scripted(argv, cwd)
+    }
+    const client = new GhClient(spying, "/repo", "https://ghe.example.com/acme/widget")
+
+    await client.reviewSnapshot(7)
+
+    const graphql = seen.find((argv) => argv[1] === "api" && argv[2] === "graphql")
+    expect(graphql).toContain("--hostname")
+    expect(graphql).toContain("ghe.example.com")
+    expect(graphql).toContain("owner=acme")
+    expect(graphql).toContain("name=widget")
+    expect(graphql).toContain("number=7")
+  })
+
+  it("throws GhError when the graphql call exits non-zero", async () => {
+    const client = new GhClient(scriptedExec(GIT_REMOTE_SCRIPT), "/repo")
+
+    expect(client.reviewSnapshot(12)).rejects.toBeInstanceOf(GhError)
   })
 })
