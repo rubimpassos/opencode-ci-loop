@@ -141,6 +141,10 @@ export async function notifyPhase(
     case "running":
       await toast(`CI: ${summarizeRuns(phase.runs)} · ${context}`, "info")
       return
+    case "reviewing":
+    case "review-ended":
+      // TODO(T9): review notifications (batched injection, fingerprints, toasts) land in notify.ts.
+      return
     case "timed-out":
       await toast(`Timed out waiting for CI · ${context}`, "warning")
       return

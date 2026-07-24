@@ -47,6 +47,7 @@ function makeReport(
     failedLogs,
     pr,
     ruleFailures,
+    review: null,
   }
 }
 

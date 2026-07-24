@@ -359,6 +359,7 @@ export class GhClient {
       failedLogs,
       pr,
       ruleFailures,
+      review: null,
     }
   }
 

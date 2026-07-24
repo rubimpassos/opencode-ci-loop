@@ -142,6 +142,7 @@ function doneWatch(runsSucceed: boolean, pr: PrInfo | null = null): Watch {
         failedLogs: [],
         pr,
         ruleFailures: [],
+        review: null,
       },
     },
   }

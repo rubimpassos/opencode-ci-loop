@@ -106,6 +106,84 @@ export type PrInfo = {
   readonly checks: readonly PrCheck[]
 }
 
+export const REVIEW_STATES = ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"] as const
+export type ReviewState = (typeof REVIEW_STATES)[number]
+
+export const REVIEW_END_REASONS = ["ready", "merged", "closed", "idle-timeout"] as const
+export type ReviewEndReason = (typeof REVIEW_END_REASONS)[number]
+
+export type ReviewComment = {
+  readonly databaseId: number
+  readonly author: string
+  readonly body: string
+  readonly path: string | null
+  readonly line: number | null
+  readonly url: string
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+export type ReviewThread = {
+  readonly id: string
+  readonly isResolved: boolean
+  readonly isOutdated: boolean
+  readonly comments: readonly ReviewComment[]
+}
+
+export type ReviewInfo = {
+  readonly databaseId: number
+  readonly author: string
+  readonly state: ReviewState
+  readonly body: string
+  readonly submittedAt: string
+  readonly url: string
+}
+
+export type ReviewSnapshot = {
+  readonly prNumber: number
+  readonly prState: PrState
+  readonly merged: boolean
+  readonly reviewDecision: PrReviewDecision | null
+  readonly mergeStateStatus: PrMergeStateStatus
+  readonly threads: readonly ReviewThread[]
+  readonly reviews: readonly ReviewInfo[]
+  readonly comments: readonly ReviewComment[]
+  readonly fetchedAt: number
+}
+
+export type NewCommentEvent = {
+  readonly comment: ReviewComment
+  readonly threadId: string | null
+  readonly isResolved: boolean | null
+  readonly path: string | null
+  readonly line: number | null
+}
+
+export type ThreadChange = {
+  readonly threadId: string
+  readonly path: string | null
+  readonly line: number | null
+}
+
+export type ReviewDelta = {
+  readonly newComments: readonly NewCommentEvent[]
+  readonly newReviews: readonly ReviewInfo[]
+  readonly threadsResolved: readonly ThreadChange[]
+  readonly threadsUnresolved: readonly ThreadChange[]
+  readonly decisionChange: {
+    readonly from: PrReviewDecision | null
+    readonly to: PrReviewDecision | null
+  } | null
+  readonly mergeStateChange: { readonly from: PrMergeStateStatus; readonly to: PrMergeStateStatus } | null
+  readonly unresolved: { readonly from: number; readonly to: number }
+}
+
+export type MidCiReviewUpdate = {
+  readonly delta: ReviewDelta
+  readonly snapshot: ReviewSnapshot
+  readonly runs: readonly WorkflowRun[]
+}
+
 export type CiReport = {
   readonly sha: CommitSha
   readonly branch: string
@@ -116,12 +194,26 @@ export type CiReport = {
   readonly failedLogs: readonly FailedRunLog[]
   readonly pr: PrInfo | null
   readonly ruleFailures: readonly RuleFailure[]
+  readonly review: ReviewSnapshot | null
 }
 
 export type WatchPhase =
   | { readonly kind: "waiting" }
   | { readonly kind: "running"; readonly runs: readonly WorkflowRun[] }
   | { readonly kind: "done"; readonly report: CiReport }
+  | {
+      readonly kind: "reviewing"
+      readonly report: CiReport
+      readonly snapshot: ReviewSnapshot
+      readonly delta: ReviewDelta
+    }
+  | {
+      readonly kind: "review-ended"
+      readonly report: CiReport
+      readonly snapshot: ReviewSnapshot
+      readonly delta: ReviewDelta
+      readonly reason: ReviewEndReason
+    }
   | { readonly kind: "timed-out"; readonly runs: readonly WorkflowRun[] }
   | { readonly kind: "error"; readonly message: string }
 
@@ -163,6 +255,22 @@ export const PluginConfigSchema = z.object({
       port: z.number().int().min(1024).max(65535).default(4517),
     })
     .default({ enabled: true, host: "127.0.0.1", port: 4517 }),
+  language: z.string().default("auto"),
+  review: z
+    .object({
+      enabled: z.boolean().default(true),
+      pollIntervalMs: z.number().int().min(5000).default(30_000),
+      idleTimeoutMs: z.number().int().min(60_000).default(3_600_000),
+      agentMarker: z.string().default("_🤖 via agent_"),
+      ignoreAuthors: z.array(z.string()).default([]),
+    })
+    .default({
+      enabled: true,
+      pollIntervalMs: 30_000,
+      idleTimeoutMs: 3_600_000,
+      agentMarker: "_🤖 via agent_",
+      ignoreAuthors: [],
+    }),
 })
 
 export type PluginConfig = z.infer<typeof PluginConfigSchema>
