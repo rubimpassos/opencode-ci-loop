@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test"
 import { z } from "zod"
+import { DASHBOARD_HTML } from "./dashboard.ts"
 import { DashboardServer, isAllowedHost, type SessionControl } from "./server.ts"
 import type { CommitSha, SessionId, SessionState, Watch } from "./types.ts"
 
@@ -15,6 +16,13 @@ describe("isAllowedHost", () => {
     [null, false],
   ])("host %j allowed=%p on port 4517", (hostHeader, expected) => {
     expect(isAllowedHost(hostHeader, 4517)).toBe(expected)
+  })
+})
+
+describe("DASHBOARD_HTML", () => {
+  it("dispatches review phases in phaseView", () => {
+    expect(DASHBOARD_HTML).toContain('phase.kind === "reviewing"')
+    expect(DASHBOARD_HTML).toContain('phase.kind === "review-ended"')
   })
 })
 

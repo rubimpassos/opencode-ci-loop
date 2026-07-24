@@ -31,6 +31,7 @@ export const DASHBOARD_HTML = `<!doctype html>
   .watch-meta { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
   .phase { font-weight: 600; }
   .phase.waiting, .phase.running { color: var(--blue); }
+  .phase.reviewing { color: var(--blue); }
   .phase.done-ok { color: var(--green); }
   .phase.done-fail, .phase.error { color: var(--red); }
   .phase.timed-out { color: var(--yellow); }
@@ -88,6 +89,14 @@ function phaseView(watch) {
   if (phase.kind === "timed-out")
     return '<div class="phase timed-out">Timed out waiting for CI</div>' + phase.runs.map(runRow).join("");
   if (phase.kind === "error") return '<div class="phase error">Error: ' + esc(phase.message) + "</div>";
+  if (phase.kind === "reviewing") {
+    const unresolved = phase.snapshot.threads.filter((thread) => !thread.isResolved).length;
+    return '<div class="phase reviewing">👀 watching reviews · ' + esc(unresolved) + ' unresolved</div>'
+      + prView(phase.report);
+  }
+  if (phase.kind === "review-ended") {
+    return '<div class="phase done-ok">review watch ended (' + esc(phase.reason) + ")</div>";
+  }
   const clean = phase.report.runs.every((r) => r.conclusion === "success" || r.conclusion === "skipped");
   let html = '<div class="phase ' + (clean ? "done-ok" : "done-fail") + '">'
     + (clean ? "✓ CI green" : "✗ CI failed") + "</div>" + phase.report.runs.map(runRow).join("");
