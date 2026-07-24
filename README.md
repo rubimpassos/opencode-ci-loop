@@ -9,7 +9,7 @@
 
 **CI validation loop** plugin for [opencode](https://opencode.ai) — the equivalent of Claude Code desktop's validation loop.
 
-After the agent runs `git push`, the plugin watches GitHub Actions and **injects the CI result (including failure log tails) back into the session**. Red CI becomes a fix instruction; the agent reacts without you asking. With a per-session toggle, TUI toasts, and a live visual dashboard.
+After the agent runs `git push`, the plugin watches GitHub Actions and **injects the CI result (including failure log tails) back into the session**. Red CI becomes a fix instruction; the agent reacts without you asking. Once CI settles, it **keeps watching the PR's reviews** — Copilot's push-time review and human comments that arrive later — and injects those too. With a per-session toggle, TUI toasts, a live visual dashboard, and localized reports (English / Brazilian Portuguese).
 
 ## How it works
 
@@ -35,6 +35,33 @@ sequenceDiagram
 3. The report is injected via `session.prompt` — **using the model the session was using**, not the agent default
 4. If the branch has an open PR, the report includes whether it's ready to merge and the exact blockers (draft, conflicts, pending review…)
 
+## Review watching
+
+CI green is rarely the end of a PR. Copilot reviews on every push, humans comment minutes or hours later, and an unresolved-conversation rule can flip a PR from mergeable to blocked **without any CI re-running**. So once the CI watch settles on a branch with an open PR, the loop keeps going:
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant P as Plugin
+    participant GH as GitHub
+    Note over P: CI settled → reviewing phase
+    P->>GH: gh api graphql (review threads + reviews, poll)
+    GH-->>P: 🤖 Copilot review (on push)
+    P-->>A: review update → "address these comments"
+    GH-->>P: 👤 human comment + BLOCKED (unresolved rule)
+    P-->>A: review update → "fix, reply, resolve"
+    A->>GH: reply (tagged _🤖 via agent_) + resolve
+    GH-->>P: all threads resolved → CLEAN
+    P-->>A: ✅ ready to merge · [review watch ended]
+```
+
+- **What triggers an update** — new review comments or reviews (Copilot or human), threads flipping resolved/unresolved, and `reviewDecision` / `mergeStateStatus` changes (e.g. an unresolved-conversation rule turning the PR `BLOCKED`).
+- **Mid-CI** — Copilot's review usually lands before CI finishes; those comments are injected right away so the agent can start fixing in parallel.
+- **Batched & deduped** — one injection per poll cycle; each comment/review/state-change is fingerprinted by PR (not commit), so a new push to the same branch never re-notifies already-seen items.
+- **The agent-marker contract** — every reply the agent posts to a review thread ends with a line containing the marker (default `_🤖 via agent_`). That marker is the **only** notification filter: marked comments are treated as the agent's own and skipped, while a human commenting from the same account still comes through. Configure it via `review.agentMarker`; add more logins to skip via `review.ignoreAuthors`.
+- **When it stops** — the PR is merged or closed, a new push supersedes the watch, or `review.idleTimeoutMs` (default 1h, re-armed on every update) elapses with no new activity.
+- **Language** — review reports and toasts follow the `language` option (auto-detected or pinned to `en` / `pt-BR`); comment bodies, logins, and URLs are always shown verbatim.
+
 ## Features
 
 - **Push detection** — `tool.execute.after` hook catches the agent's `git push` (ignores `--dry-run` and rejected pushes)
@@ -42,8 +69,11 @@ sequenceDiagram
 - **Multi-worktree / multi-repo** — watches every branch pushed from linked worktrees or external repos in parallel, labeling the source (session branch vs. worktree vs. external repo) without dropping the session's earlier watches
 - **Context injection** — green CI becomes a noop, red CI becomes a fix instruction with the log tail of every failed run
 - **PR readiness** — with an open PR on the branch, the report says whether it can merge and lists the exact blockers
+- **Review watching** — after CI settles, keeps polling the PR's review threads and injects new Copilot / human comments, thread resolutions, and review-decision changes (even when no CI re-runs)
+- **Agent-marker filter** — the agent's own replies (tagged with a configurable marker) are the only comments filtered out, so it never notifies itself; humans on the same account still come through
+- **i18n** — reports and toasts render in English or Brazilian Portuguese, auto-detected from the session or pinned via config
 - **Per-session toggle** — `ci_watch` tool (`enable` / `disable` / `status`); tell the agent "turn off the ci loop" anytime
-- **TUI toasts** — `Waiting for CI…` → `CI: 1/2 completed` → `CI green/failed` (deduped per phase transition)
+- **TUI toasts** — `Waiting for CI…` → `CI: 1/2 completed` → `CI green/failed`, then review toasts (`Copilot review: 3 comments` → `All threads resolved`) — deduped per transition
 - **Live dashboard** — mini HTTP+SSE server at `http://127.0.0.1:4517` with a per-session panel
 - **Multi-project** — plugin instances across multiple worktrees share a single dashboard (per-port singleton)
 - **Fork-aware** — resolves the push repo via `@{push}` (`gh` alone resolves to the `upstream` remote on forks and misses the runs)
@@ -73,7 +103,15 @@ Or with options:
       "pollIntervalMs": 15000,
       "timeoutMs": 1800000,
       "failLogLines": 80,
-      "dashboard": { "enabled": true, "host": "127.0.0.1", "port": 4517 }
+      "dashboard": { "enabled": true, "host": "127.0.0.1", "port": 4517 },
+      "language": "auto",
+      "review": {
+        "enabled": true,
+        "pollIntervalMs": 30000,
+        "idleTimeoutMs": 3600000,
+        "agentMarker": "_🤖 via agent_",
+        "ignoreAuthors": []
+      }
     }]
   ]
 }
@@ -89,6 +127,12 @@ Or with options:
 | `dashboard.enabled` | `true` | Enables the visual panel server |
 | `dashboard.host` | `127.0.0.1` | Panel host (keep it on loopback) |
 | `dashboard.port` | `4517` | Panel port |
+| `language` | `"auto"` | Report/toast language; `"auto"` detects it from the session's messages. Supported: `en`, `pt-BR` |
+| `review.enabled` | `true` | Watch PR review comments after CI settles |
+| `review.pollIntervalMs` | `30000` | Review-watch polling interval (min 5000) |
+| `review.idleTimeoutMs` | `3600000` (1h) | Stop watching after this long with no new review activity (re-armed on every update; min 60000) |
+| `review.agentMarker` | `"_🤖 via agent_"` | Marker the agent appends to its own review replies; comments ending with it are the only ones filtered from notifications |
+| `review.ignoreAuthors` | `[]` | Extra author logins to ignore (e.g. `["codecov[bot]"]`) |
 
 ## Usage
 
@@ -128,12 +172,17 @@ bun run check   # typecheck + biome + tests
 ## Architecture
 
 ```
-src/plugin.ts    # wiring: hooks, ci_watch tool, toasts, prompt injection, shared singleton
-src/registry.ts  # per-session state + watch loop (abortable)
-src/gh.ts        # gh/git integration (injectable exec, fork-aware)
-src/render.ts    # markdown report for the prompt + summaries + PR readiness
-src/server.ts    # dashboard HTTP+SSE
-src/dashboard.ts # panel page
+src/plugin.ts         # wiring: hooks, ci_watch tool, shared singleton
+src/registry.ts       # per-session state + CI watch loop + post-CI review loop (abortable)
+src/gh.ts             # gh/git integration (injectable exec, fork-aware)
+src/gh-review.ts      # PR review snapshot via gh GraphQL (threads, reviews, comments)
+src/review.ts         # pure review diff engine + review-cycle evaluator
+src/render.ts         # markdown CI report for the prompt + summaries + PR readiness
+src/render-review.ts  # markdown review update messages (mid-CI, post-CI, final)
+src/notify.ts         # toasts, prompt injection, fingerprint dedupe, locale resolution
+src/i18n.ts           # en / pt-BR message catalogs + language detection
+src/server.ts         # dashboard HTTP+SSE
+src/dashboard.ts      # panel page
 ```
 
 No runtime dependencies beyond `@opencode-ai/plugin`. Strictly typed, tested with `bun test`.
