@@ -67,6 +67,7 @@ export function acquireShared(config: PluginConfig, client: OpencodeClient): Sha
     onPhase: async (sessionID, watch, signal) => {
       await notifyPhase(shared.client, shared.notifications, sessionID, watch, signal)
     },
+    onReviewUpdate: async () => {}, // TODO(T9): inject mid-CI review updates via notify.ts.
   })
 
   const shared: SharedCiLoop = { registry, dashboard, refs: 1, client, notifications }

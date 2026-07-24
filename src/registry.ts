@@ -1,16 +1,24 @@
-import type { GhClient } from "./gh.ts"
-import type {
-  PluginConfig,
-  PushTarget,
-  SessionId,
-  SessionState,
-  Watch,
-  WatchKey,
-  WatchPhase,
+import { type GhClient, GhError } from "./gh.ts"
+import { computeDelta, evaluateReviewCycle, isEmptyDelta } from "./review.ts"
+import {
+  assertNever,
+  type CiReport,
+  type MidCiReviewUpdate,
+  type PluginConfig,
+  type PushTarget,
+  type ReviewSnapshot,
+  type SessionId,
+  type SessionState,
+  type Watch,
+  type WatchKey,
+  type WatchPhase,
 } from "./types.ts"
 
+// allow: SIZE_OK — orchestration: CI watch + review watch share one abort/supersede discipline and
+// per-session state; all review decision logic already lives in the pure evaluator (review.ts).
+
 /** Subset of GhClient that a watch needs. Injected per push (each project has its own cwd). */
-export type CiGh = Pick<GhClient, "listRuns" | "buildReport">
+export type CiGh = Pick<GhClient, "listRuns" | "buildReport" | "findPrForBranch" | "reviewSnapshot">
 
 export type Sleep = (ms: number, signal: AbortSignal) => Promise<void>
 
@@ -34,6 +42,13 @@ export type RegistryEvents = {
   readonly onChange: (sessions: readonly SessionState[]) => void
   /** Phase transition of a watch (toasts). */
   readonly onPhase: (sessionID: SessionId, watch: Watch, signal: AbortSignal) => Promise<void>
+  /** Review activity detected while CI is still running (phase stays `running`). */
+  readonly onReviewUpdate: (
+    sessionID: SessionId,
+    watch: Watch,
+    update: MidCiReviewUpdate,
+    signal: AbortSignal,
+  ) => Promise<void>
 }
 
 type WatchSlot = {
@@ -59,6 +74,7 @@ export class WatchRegistry {
     private readonly config: PluginConfig,
     private readonly events: RegistryEvents,
     private readonly sleep: Sleep = abortableSleep,
+    private readonly now: () => number = Date.now,
   ) {}
 
   snapshot(): readonly SessionState[] {
@@ -132,18 +148,39 @@ export class WatchRegistry {
     const { signal } = controller
     const deadline = Date.now() + this.config.timeoutMs
     await this.sleep(this.config.initialDelayMs, signal)
+    const prNumber = this.config.review.enabled ? await this.discoverPr(gh, target.branch) : null
+    let midCi: ReviewSnapshot | null = null
 
     while (this.isCurrent(session, key, controller) && Date.now() < deadline) {
       const runs = await gh.listRuns(target.sha, target.branch)
       if (!this.isCurrent(session, key, controller)) return
-      if (runs.length > 0) {
-        if (runs.every((run) => run.status === "completed")) {
-          const report = await gh.buildReport(target, this.config.failLogLines)
-          if (!this.isCurrent(session, key, controller)) return
-          this.setPhase(session, key, controller, { kind: "done", report })
-          return
+      if (runs.length > 0 && runs.every((run) => run.status === "completed")) {
+        let report = await gh.buildReport(target, this.config.failLogLines)
+        if (!this.isCurrent(session, key, controller)) return
+        const seed =
+          report.pr !== null && this.config.review.enabled
+            ? ((await this.fetchSnapshot(gh, report.pr.number)) ?? midCi)
+            : null
+        if (seed !== null) report = { ...report, review: seed }
+        this.setPhase(session, key, controller, { kind: "done", report })
+        if (seed !== null) await this.reviewLoop(session, key, gh, controller, seed, report)
+        return
+      }
+      if (runs.length > 0) this.setPhase(session, key, controller, { kind: "running", runs })
+      if (prNumber !== null) {
+        const snapshot = await this.fetchSnapshot(gh, prNumber)
+        if (!this.isCurrent(session, key, controller)) return
+        if (snapshot !== null) {
+          const watch = session.watches.get(key)?.watch
+          // First successful snapshot only seeds the baseline: pre-existing state never notifies mid-CI.
+          if (midCi !== null && watch !== undefined) {
+            const delta = computeDelta(midCi, snapshot, this.config.review)
+            if (!isEmptyDelta(delta)) {
+              void this.events.onReviewUpdate(session.sessionID, watch, { delta, snapshot, runs }, signal)
+            }
+          }
+          midCi = snapshot
         }
-        this.setPhase(session, key, controller, { kind: "running", runs })
       }
       await this.sleep(this.config.pollIntervalMs, signal)
     }
@@ -152,6 +189,76 @@ export class WatchRegistry {
     const phase = session.watches.get(key)?.watch.phase
     const runs = phase?.kind === "running" ? phase.runs : []
     this.setPhase(session, key, controller, { kind: "timed-out", runs })
+  }
+
+  /** Post-CI review polling: every decision comes from the pure evaluator (review.ts); this only orchestrates. */
+  private async reviewLoop(
+    session: MutableSession,
+    key: WatchKey,
+    gh: CiGh,
+    controller: AbortController,
+    seed: ReviewSnapshot,
+    report: CiReport,
+  ): Promise<void> {
+    const { signal } = controller
+    let prev = seed
+    let idleDeadline = this.now() + this.config.review.idleTimeoutMs
+    while (this.isCurrent(session, key, controller)) {
+      await this.sleep(this.config.review.pollIntervalMs, signal)
+      if (!this.isCurrent(session, key, controller)) return
+      const snapshot = await this.fetchSnapshot(gh, seed.prNumber)
+      if (!this.isCurrent(session, key, controller)) return
+      if (snapshot === null) continue
+      const delta = computeDelta(prev, snapshot, this.config.review)
+      const outcome = evaluateReviewCycle({ delta, snapshot, nowMs: this.now(), idleDeadline })
+      switch (outcome.kind) {
+        case "continue":
+          prev = snapshot
+          break
+        case "notify":
+          this.setPhase(session, key, controller, {
+            kind: "reviewing",
+            report,
+            snapshot,
+            delta: outcome.delta,
+          })
+          idleDeadline = this.now() + this.config.review.idleTimeoutMs
+          prev = snapshot
+          break
+        case "end": {
+          const { delta: endDelta, reason } = outcome
+          this.setPhase(session, key, controller, {
+            kind: "review-ended",
+            report,
+            snapshot,
+            delta: endDelta,
+            reason,
+          })
+          return
+        }
+        default:
+          return assertNever(outcome)
+      }
+    }
+  }
+
+  /** One-shot PR discovery for mid-CI review polling; any failure simply disables it for this watch. */
+  private async discoverPr(gh: CiGh, branch: string): Promise<number | null> {
+    try {
+      return (await gh.findPrForBranch(branch))?.number ?? null
+    } catch {
+      return null
+    }
+  }
+
+  /** Best-effort snapshot fetch: a failed `gh` call skips the cycle instead of killing the watch. */
+  private async fetchSnapshot(gh: CiGh, prNumber: number): Promise<ReviewSnapshot | null> {
+    try {
+      return await gh.reviewSnapshot(prNumber)
+    } catch (error) {
+      if (error instanceof GhError) return null
+      throw error
+    }
   }
 
   private setPhase(
