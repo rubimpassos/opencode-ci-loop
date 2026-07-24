@@ -1,19 +1,13 @@
 import { type Plugin, tool } from "@opencode-ai/plugin"
 import { bunExec, GhClient } from "./gh.ts"
-import { WatchRegistry, watchKey } from "./registry.ts"
-import {
-  isReportClean,
-  prReadiness,
-  renderPromptReport,
-  renderWatchNotice,
-  sourceLabel,
-  summarizeRuns,
-} from "./render.ts"
+import type { Locale } from "./i18n.ts"
+import { clearSessionNotifications, type NotifyContext, notifyPhase, notifyReviewUpdate } from "./notify.ts"
+import { WatchRegistry } from "./registry.ts"
+import { renderWatchNotice } from "./render.ts"
 import { resolvePushTargets } from "./resolve.ts"
 import { DashboardServer } from "./server.ts"
-import { assertNever, type PluginConfig, PluginConfigSchema, type SessionId, type Watch } from "./types.ts"
-
-type OpencodeClient = Parameters<Plugin>[0]["client"]
+import type { OpencodeClient } from "./session-context.ts"
+import { assertNever, type PluginConfig, PluginConfigSchema, type SessionId } from "./types.ts"
 
 const BashArgsSchema = tool.schema.object({ command: tool.schema.string() }).loose()
 
@@ -34,6 +28,7 @@ type SharedCiLoop = {
   refs: number
   client: OpencodeClient
   readonly notifications: Set<string>
+  readonly locales: Map<SessionId, Locale>
 }
 
 const SHARED_KEY = Symbol.for("opencode-ci-loop.shared")
@@ -61,16 +56,18 @@ export function acquireShared(config: PluginConfig, client: OpencodeClient): Sha
 
   const dashboard = new DashboardServer(config.dashboard)
   const notifications = new Set<string>()
+  const locales = new Map<SessionId, Locale>()
+  // Rebuilt per event so notifications always use the most recent client instance.
+  const ctx = (): NotifyContext => ({ client: shared.client, notifications, locales, config })
 
   const registry = new WatchRegistry(config, {
     onChange: (sessions) => dashboard.broadcast(sessions),
-    onPhase: async (sessionID, watch, signal) => {
-      await notifyPhase(shared.client, shared.notifications, sessionID, watch, signal)
-    },
-    onReviewUpdate: async () => {}, // TODO(T9): inject mid-CI review updates via notify.ts.
+    onPhase: (sessionID, watch, signal) => notifyPhase(ctx(), sessionID, watch, signal),
+    onReviewUpdate: (sessionID, watch, update, signal) =>
+      notifyReviewUpdate(ctx(), sessionID, watch, update, signal),
   })
 
-  const shared: SharedCiLoop = { registry, dashboard, refs: 1, client, notifications }
+  const shared: SharedCiLoop = { registry, dashboard, refs: 1, client, notifications, locales }
   dashboard.setControl({
     getSession: (id) => registry.sessionView(id as SessionId),
     setEnabled: (id, enabled) => {
@@ -92,96 +89,6 @@ export function releaseShared(port: number): void {
   shared.registry.dispose()
   shared.dashboard.stop()
   map.delete(port)
-}
-
-/**
- * Model last used in the session, so the injected report replies on it — not the agent default.
- * The user may have switched models mid-session; without this the prompt reverts to the default.
- */
-export async function resolveSessionModel(
-  client: OpencodeClient,
-  sessionID: SessionId,
-): Promise<{ providerID: string; modelID: string } | undefined> {
-  try {
-    const response = await client.session.messages({ path: { id: sessionID } })
-    const messages = response.data ?? []
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const info = messages[i]?.info
-      if (info?.role === "assistant") return { providerID: info.providerID, modelID: info.modelID }
-    }
-  } catch (error) {
-    if (!(error instanceof Error)) throw error
-  }
-  return undefined
-}
-
-export async function notifyPhase(
-  client: OpencodeClient,
-  notifications: Set<string>,
-  sessionID: SessionId,
-  watch: Watch,
-  signal?: AbortSignal,
-): Promise<void> {
-  if (signal?.aborted) return
-  const phase = watch.phase
-  const phaseFingerprint = phase.kind === "running" ? `running:${summarizeRuns(phase.runs)}` : phase.kind
-  const fingerprint = `${sessionID}\0${watchKey(watch.repo, watch.branch)}\0${watch.sha}\0${phaseFingerprint}`
-  if (notifications.has(fingerprint)) return
-  notifications.add(fingerprint)
-  const context = `${watch.repo} · ${watch.branch} — ${sourceLabel(watch.sourceKind, watch.directory)}`
-
-  const toast = async (message: string, variant: "info" | "success" | "warning" | "error") => {
-    if (signal?.aborted) return
-    await client.tui.showToast({ body: { title: "CI Loop", message, variant } })
-  }
-
-  switch (phase.kind) {
-    case "waiting":
-      await toast(`Waiting for CI to start… · ${context}`, "info")
-      return
-    case "running":
-      await toast(`CI: ${summarizeRuns(phase.runs)} · ${context}`, "info")
-      return
-    case "reviewing":
-    case "review-ended":
-      // TODO(T9): review notifications (batched injection, fingerprints, toasts) land in notify.ts.
-      return
-    case "timed-out":
-      await toast(`Timed out waiting for CI · ${context}`, "warning")
-      return
-    case "error":
-      await toast(`CI watch failed: ${phase.message} · ${context}`, "error")
-      return
-    case "done": {
-      const clean = isReportClean(phase.report)
-      let message = clean ? `CI green (${phase.report.runs.length} checks)` : "CI failed — injecting report"
-      if (phase.report.pr) {
-        const readiness = prReadiness(phase.report.pr, clean)
-        const prStatus = readiness.ready
-          ? "ready to merge"
-          : `blocked: ${readiness.blockers.length} issue${readiness.blockers.length === 1 ? "" : "s"}`
-        message += ` · PR #${phase.report.pr.number} ${prStatus}`
-      }
-      await toast(`${message} · ${context}`, clean ? "success" : "error")
-      if (signal?.aborted) return
-      const model = await resolveSessionModel(client, sessionID)
-      if (signal?.aborted) return
-      await client.session.prompt({
-        path: { id: sessionID },
-        body: { ...(model && { model }), parts: [{ type: "text", text: renderPromptReport(phase.report) }] },
-      })
-      return
-    }
-    default:
-      return assertNever(phase)
-  }
-}
-
-export function clearSessionNotifications(notifications: Set<string>, sessionID: SessionId): void {
-  const prefix = `${sessionID}\0`
-  for (const fingerprint of notifications) {
-    if (fingerprint.startsWith(prefix)) notifications.delete(fingerprint)
-  }
 }
 
 export const CiLoopPlugin: Plugin = async ({ client, directory }, options) => {
@@ -215,7 +122,7 @@ export const CiLoopPlugin: Plugin = async ({ client, directory }, options) => {
       if (event.type === "session.deleted") {
         const sessionID = event.properties.info.id as SessionId
         registry.remove(sessionID)
-        clearSessionNotifications(shared.notifications, sessionID)
+        clearSessionNotifications(shared.notifications, sessionID, shared.locales)
       }
     },
 

@@ -1,13 +1,9 @@
 import { CATALOGS, type Locale, type Messages } from "./i18n.ts"
+import { isBotAuthor } from "./review.ts"
 import type { MidCiReviewUpdate, NewCommentEvent, ReviewDelta, ReviewInfo, ReviewSnapshot } from "./types.ts"
 
 export type ReviewMessageContext = { readonly repo: string; readonly prNumber: number }
 export type ReviewReadiness = { readonly ready: boolean; readonly blockers: readonly string[] }
-
-// TODO(T9): swap to import from ./review.ts once landed
-function isBotAuthor(login: string): boolean {
-  return login === "Copilot" || login === "copilot-pull-request-reviewer" || login.endsWith("[bot]")
-}
 
 function displayAuthor(login: string): string {
   return login === "copilot-pull-request-reviewer" ? "Copilot" : login
