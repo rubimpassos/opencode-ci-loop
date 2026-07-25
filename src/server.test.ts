@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test"
 import { z } from "zod"
 import { DASHBOARD_HTML } from "./dashboard.ts"
+import { DASHBOARD_SCRIPT } from "./dashboard-script.ts"
+import { DASHBOARD_STYLES } from "./dashboard-styles.ts"
 import { PANEL_PHASE_KEYS, type PanelChrome, type PanelSession, type PanelSnapshot } from "./panel-types.ts"
 import { DashboardServer, isAllowedHost, type PanelMapper, type SessionControl } from "./server.ts"
 import type { CommitSha, SessionId, SessionState, Watch } from "./types.ts"
@@ -21,9 +23,9 @@ describe("isAllowedHost", () => {
 })
 
 describe("DASHBOARD_HTML", () => {
-  it("dispatches review phases in phaseView", () => {
-    expect(DASHBOARD_HTML).toContain('phase.kind === "reviewing"')
-    expect(DASHBOARD_HTML).toContain('phase.kind === "review-ended"')
+  it("embeds the styles and the script", () => {
+    expect(DASHBOARD_HTML).toContain(DASHBOARD_STYLES)
+    expect(DASHBOARD_HTML).toContain(DASHBOARD_SCRIPT)
   })
 })
 
