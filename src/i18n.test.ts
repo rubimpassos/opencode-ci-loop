@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test"
 import { CATALOGS, detectLocale, LOCALES, type Locale, resolveLocale } from "./i18n.ts"
+import { EN } from "./i18n-en.ts"
+import { PT_BR } from "./i18n-pt-br.ts"
 
 describe("detectLocale", () => {
   const table: readonly { readonly text: string; readonly expected: Locale }[] = [
@@ -199,5 +201,12 @@ describe("CATALOGS[pt-BR]", () => {
     expect(ptBR.reviewMidCiInstruction).not.toBe(CATALOGS.en.reviewMidCiInstruction)
     expect(ptBR.reviewKeepsWatching).not.toBe(CATALOGS.en.reviewKeepsWatching)
     expect(ptBR.reviewAddressInstruction).not.toBe(CATALOGS.en.reviewAddressInstruction)
+  })
+})
+
+describe("CATALOGS assembly", () => {
+  it("exposes each catalog from its own module", () => {
+    expect(CATALOGS.en).toBe(EN)
+    expect(CATALOGS["pt-BR"]).toBe(PT_BR)
   })
 })
