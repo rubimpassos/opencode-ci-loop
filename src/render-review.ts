@@ -1,6 +1,13 @@
 import { CATALOGS, type Locale, type Messages } from "./i18n.ts"
 import { isBotAuthor } from "./review.ts"
-import type { MidCiReviewUpdate, NewCommentEvent, ReviewDelta, ReviewInfo, ReviewSnapshot } from "./types.ts"
+import type {
+  MidCiReviewUpdate,
+  NewCommentEvent,
+  ReviewDelta,
+  ReviewInfo,
+  ReviewSnapshot,
+  ReviewThread,
+} from "./types.ts"
 
 export type ReviewMessageContext = { readonly repo: string; readonly prNumber: number }
 export type ReviewReadiness = { readonly ready: boolean; readonly blockers: readonly string[] }
@@ -178,13 +185,21 @@ export function renderReviewEnded(
   return lines.join("\n")
 }
 
+function unresolvedThreadsOf(snapshot: ReviewSnapshot): readonly ReviewThread[] {
+  return snapshot.threads.filter((thread) => !thread.isResolved)
+}
+
+export function unresolvedThreadCount(snapshot: ReviewSnapshot): number {
+  return unresolvedThreadsOf(snapshot).length
+}
+
 /** Template B's review section for the done report (T7 embeds `lines` and appends the marker block). */
 export function renderReviewSection(
   snapshot: ReviewSnapshot,
   locale: Locale = "en",
 ): { readonly lines: readonly string[]; readonly unresolvedCount: number } {
   const messages = CATALOGS[locale]
-  const unresolvedThreads = snapshot.threads.filter((thread) => !thread.isResolved)
+  const unresolvedThreads = unresolvedThreadsOf(snapshot)
   const rootEvents = unresolvedThreads.flatMap((thread) => {
     const root = thread.comments[0]
     if (root === undefined) return []

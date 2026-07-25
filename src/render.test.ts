@@ -1,10 +1,18 @@
 import { describe, expect, it } from "bun:test"
 import { CATALOGS } from "./i18n.ts"
-import { isReportClean, prReadiness, renderPromptReport, renderWatchNotice, summarizeRuns } from "./render.ts"
+import {
+  externalChecks,
+  isReportClean,
+  prReadiness,
+  renderPromptReport,
+  renderWatchNotice,
+  summarizeRuns,
+} from "./render.ts"
 import { renderMarkerInstruction } from "./render-review.ts"
 import type {
   CiReport,
   CommitSha,
+  PrCheck,
   PrInfo,
   PushTarget,
   ReviewComment,
@@ -481,5 +489,91 @@ describe("renderWatchNotice", () => {
     expect(notice).toContain("linked worktree at /repo-a")
     expect(notice).toContain("ghe.example.com/acme/widget · release")
     expect(notice).toContain("external repo at /external/widget")
+  })
+})
+
+describe("externalChecks", () => {
+  function makeCheck(overrides: Partial<PrCheck> = {}): PrCheck {
+    return {
+      name: "vercel",
+      workflowName: null,
+      status: "failing",
+      state: "FAILURE",
+      url: "https://x/v",
+      ...overrides,
+    }
+  }
+
+  it("keeps failing/pending checks that are not already shown as workflow runs", () => {
+    const failing = makeCheck({ name: "vercel", status: "failing" })
+    const pending = makeCheck({ name: "jenkins", status: "pending", state: "PENDING", url: null })
+    const report = makeReport([makeRun({})], [], makePr({ checks: [failing, pending] }))
+
+    expect(externalChecks(report)).toEqual([failing, pending])
+  })
+
+  it("drops passing and skipped checks", () => {
+    const checks = [
+      makeCheck({ name: "lint", status: "passing", state: "SUCCESS" }),
+      makeCheck({ name: "codeql", status: "skipped", state: "SKIPPED" }),
+    ]
+
+    expect(externalChecks(makeReport([makeRun({})], [], makePr({ checks })))).toEqual([])
+  })
+
+  it("drops checks whose workflowName matches a run in the report", () => {
+    const shadowed = makeCheck({ name: "build", workflowName: "CI" })
+    const foreign = makeCheck({ name: "docs", workflowName: "Docs", status: "pending", state: "PENDING" })
+    const report = makeReport([makeRun({ workflowName: "CI" })], [], makePr({ checks: [shadowed, foreign] }))
+
+    expect(externalChecks(report)).toEqual([foreign])
+  })
+
+  it("keeps checks with a null workflowName (external apps / status contexts)", () => {
+    const external = makeCheck({ name: "vercel", workflowName: null })
+    const report = makeReport([makeRun({ workflowName: "CI" })], [], makePr({ checks: [external] }))
+
+    expect(externalChecks(report)).toEqual([external])
+  })
+
+  it("returns nothing when the branch has no PR", () => {
+    expect(externalChecks(makeReport([makeRun({})]))).toEqual([])
+  })
+
+  it("returns exactly what renderPromptReport lists under the other-checks header", () => {
+    const report = makeReport(
+      [makeRun({ workflowName: "CI" }), makeRun({ id: 2, workflowName: "Lint" })],
+      [],
+      makePr({
+        mergeStateStatus: "UNSTABLE",
+        checks: [
+          makeCheck({ name: "build", workflowName: "CI" }),
+          makeCheck({ name: "flaky", workflowName: "Lint", status: "pending", state: "PENDING" }),
+          makeCheck({ name: "vercel" }),
+          makeCheck({ name: "jenkins", status: "pending", state: "PENDING", url: null }),
+          makeCheck({ name: "docs", workflowName: "Docs", status: "pending", state: "PENDING" }),
+          makeCheck({ name: "lint-app", status: "passing", state: "SUCCESS" }),
+          makeCheck({ name: "codeql", status: "skipped", state: "SKIPPED" }),
+        ],
+      }),
+    )
+    const rendered = renderPromptReport(report).split("\n")
+    const headerIndex = rendered.indexOf(CATALOGS.en.otherChecksHeader)
+    expect(headerIndex).toBeGreaterThan(-1)
+
+    const listed: string[] = []
+    for (const line of rendered.slice(headerIndex + 1)) {
+      if (!line.startsWith("- ")) break
+      listed.push(line)
+    }
+    const selected = externalChecks(report)
+
+    expect(selected.map((check) => check.name)).toEqual(["vercel", "jenkins", "docs"])
+    expect(listed).toEqual(
+      selected.map(
+        (check) =>
+          `- ${check.status === "failing" ? "❌" : "⏳"} **${check.name}** — ${check.state}${check.url ? ` (${check.url})` : ""}`,
+      ),
+    )
   })
 })

@@ -6,6 +6,7 @@ import {
   renderPostCiReviewUpdate,
   renderReviewEnded,
   renderReviewSection,
+  unresolvedThreadCount,
 } from "./render-review.ts"
 import type {
   MidCiReviewUpdate,
@@ -468,5 +469,36 @@ describe("renderReviewSection (template B section)", () => {
   it("localizes the section header for pt-BR", () => {
     const { lines } = renderReviewSection(sectionSnapshot(), "pt-BR")
     expect(lines[0]).toBe(CATALOGS["pt-BR"].reviewCommentsSection(2))
+  })
+})
+
+describe("unresolvedThreadCount", () => {
+  function mixedSnapshot(): ReviewSnapshot {
+    return makeSnapshot({
+      threads: [
+        makeThread("T1", false, [makeComment()]),
+        makeThread("T2", true, [makeComment({ databaseId: 2 })]),
+        makeThread("T3", false, [makeComment({ databaseId: 3, author: "alice" })]),
+        makeThread("T4", true, [makeComment({ databaseId: 4 })]),
+      ],
+    })
+  }
+
+  it("counts only unresolved threads", () => {
+    expect(unresolvedThreadCount(mixedSnapshot())).toBe(2)
+  })
+
+  it("counts zero when every thread is resolved", () => {
+    const snapshot = makeSnapshot({ threads: [makeThread("T1", true, [makeComment()])] })
+    expect(unresolvedThreadCount(snapshot)).toBe(0)
+  })
+
+  it("matches renderReviewSection().unresolvedCount for the same snapshot", () => {
+    const snapshot = mixedSnapshot()
+
+    const count = unresolvedThreadCount(snapshot)
+
+    expect(count).toBe(2)
+    expect(count).toBe(renderReviewSection(snapshot).unresolvedCount)
   })
 })

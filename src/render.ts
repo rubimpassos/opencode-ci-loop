@@ -3,6 +3,7 @@ import { renderMarkerInstruction, renderReviewSection } from "./render-review.ts
 import {
   assertNever,
   type CiReport,
+  type PrCheck,
   type PrInfo,
   type PushTarget,
   type WatchSourceKind,
@@ -37,6 +38,16 @@ export function summarizeRuns(runs: readonly WorkflowRun[]): string {
 
 export function isReportClean(report: CiReport): boolean {
   return report.runs.every((run) => run.conclusion === "success" || run.conclusion === "skipped")
+}
+
+/** Failing/pending PR checks not already listed as a workflow run — shared by the report and the panel. */
+export function externalChecks(report: CiReport): readonly PrCheck[] {
+  const runWorkflows = new Set(report.runs.map((run) => run.workflowName))
+  return (report.pr?.checks ?? []).filter(
+    (check) =>
+      (check.status === "failing" || check.status === "pending") &&
+      (check.workflowName === null || !runWorkflows.has(check.workflowName)),
+  )
 }
 
 const REBASE_MERGE_COMMIT_LIMIT = 100
@@ -160,15 +171,10 @@ export function renderPromptReport(
     lines.push(`- ${runIcon(run)} **${run.workflowName}** — ${run.conclusion ?? run.status} (${run.url})`)
   }
 
-  const runWorkflows = new Set(report.runs.map((run) => run.workflowName))
-  const externalChecks = (report.pr?.checks ?? []).filter(
-    (check) =>
-      (check.status === "failing" || check.status === "pending") &&
-      (check.workflowName === null || !runWorkflows.has(check.workflowName)),
-  )
-  if (externalChecks.length > 0) {
+  const checks = externalChecks(report)
+  if (checks.length > 0) {
     lines.push("", messages.otherChecksHeader)
-    for (const check of externalChecks) {
+    for (const check of checks) {
       const icon = check.status === "failing" ? "❌" : "⏳"
       lines.push(`- ${icon} **${check.name}** — ${check.state}${check.url ? ` (${check.url})` : ""}`)
     }
