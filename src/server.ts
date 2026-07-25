@@ -1,5 +1,6 @@
 import { z } from "zod"
 import { DASHBOARD_HTML } from "./dashboard.ts"
+import type { PanelChrome, PanelSnapshot } from "./panel-types.ts"
 import type { PluginConfig, SessionState } from "./types.ts"
 
 type SseClient = {
@@ -11,6 +12,39 @@ export type SessionControl = {
   readonly getSession: (sessionID: string) => SessionState
   readonly setEnabled: (sessionID: string, enabled: boolean) => SessionState
 }
+
+/** Projects the frozen `SessionState[]` snapshot into the panel view model. Injected by the plugin. */
+export type PanelMapper = (sessions: readonly SessionState[]) => PanelSnapshot
+
+// TODO(T6): source from CATALOGS once the panel chrome keys land; T6 owns the real buildChrome.
+const EMPTY_PANEL_CHROME: PanelChrome = {
+  pageTitle: "CI Loop",
+  emptyWaiting: "Waiting for a push with CI…",
+  noMatches: "No session matches the current filters.",
+  searchPlaceholder: "Search sessions, repos, branches, PRs…",
+  filtersLabel: "Filters",
+  filterEnabledAll: "watch: all",
+  filterEnabledOn: "watch: on",
+  filterEnabledOff: "watch: off",
+  watchOn: "watch on",
+  watchOff: "watch off",
+  clearFilters: "clear",
+  hiddenTemplate: "{n} hidden by filters",
+  phaseChips: {
+    waiting: "waiting",
+    running: "running",
+    "done-green": "green",
+    "done-failed": "failed",
+    reviewing: "reviewing",
+    "review-ended": "review ended",
+    "timed-out": "timed out",
+    error: "error",
+  },
+}
+
+const EMPTY_PANEL: PanelSnapshot = { chrome: EMPTY_PANEL_CHROME, sessions: [] }
+
+const emptyPanelMapper: PanelMapper = () => EMPTY_PANEL
 
 const EnabledBodySchema = z.object({ enabled: z.boolean() })
 
@@ -25,9 +59,12 @@ const PROBE_TIMEOUT_MS = 1_000
 /** Mini servidor HTTP+SSE do dashboard. Broadcast de snapshots pros clientes conectados. */
 export class DashboardServer {
   private readonly clients = new Set<SseClient>()
+  private readonly panelClients = new Set<SseClient>()
   private server: ReturnType<typeof Bun.serve> | null = null
   private lastSnapshot: readonly SessionState[] = []
+  private lastPanel: PanelSnapshot = EMPTY_PANEL
   private control: SessionControl | null = null
+  private panelMapper: PanelMapper | null = null
   private retryTimer: ReturnType<typeof setTimeout> | null = null
   private stopped = false
   private warnedBindFailure = false
@@ -40,6 +77,10 @@ export class DashboardServer {
 
   setControl(control: SessionControl): void {
     this.control = control
+  }
+
+  setPanelMapper(mapper: PanelMapper): void {
+    this.panelMapper = mapper
   }
 
   /** Tries to bind; port taken (another opencode process) → retry until the owner frees it. */
@@ -110,7 +151,11 @@ export class DashboardServer {
           headers: { [DASHBOARD_MARKER_HEADER]: DASHBOARD_MARKER_VALUE },
         })
       case "/events":
-        return this.sse()
+        return this.streamTo(this.clients, this.lastSnapshot)
+      case "/panel/state":
+        return Response.json(this.lastPanel)
+      case "/panel/events":
+        return this.streamTo(this.panelClients, this.lastPanel)
       default:
         return new Response("not found", { status: 404 })
     }
@@ -131,18 +176,9 @@ export class DashboardServer {
 
   broadcast(snapshot: readonly SessionState[]): void {
     this.lastSnapshot = snapshot
-    const payload = encodeEvent(snapshot)
-    for (const client of this.clients) {
-      try {
-        client.controller.enqueue(payload)
-      } catch (error) {
-        if (error instanceof Error) {
-          this.clients.delete(client)
-        } else {
-          throw error
-        }
-      }
-    }
+    this.lastPanel = (this.panelMapper ?? emptyPanelMapper)(snapshot)
+    pushTo(this.clients, snapshot)
+    pushTo(this.panelClients, this.lastPanel)
   }
 
   stop(): void {
@@ -151,27 +187,19 @@ export class DashboardServer {
       clearTimeout(this.retryTimer)
       this.retryTimer = null
     }
-    for (const client of this.clients) {
-      try {
-        client.controller.close()
-      } catch (error) {
-        if (!(error instanceof Error)) throw error
-      }
-    }
-    this.clients.clear()
+    closeAll(this.clients)
+    closeAll(this.panelClients)
     this.server?.stop(true)
     this.server = null
   }
 
-  private sse(): Response {
-    const clients = this.clients
-    const snapshot = this.lastSnapshot
+  private streamTo(clients: Set<SseClient>, initial: unknown): Response {
     let client: SseClient | null = null
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         client = { controller }
         clients.add(client)
-        controller.enqueue(encodeEvent(snapshot))
+        controller.enqueue(encodeEvent(initial))
       },
       cancel() {
         if (client) clients.delete(client)
@@ -187,8 +215,34 @@ export class DashboardServer {
   }
 }
 
-function encodeEvent(snapshot: readonly SessionState[]): Uint8Array {
-  return new TextEncoder().encode(`data: ${JSON.stringify(snapshot)}\n\n`)
+function pushTo(clients: Set<SseClient>, payload: unknown): void {
+  const encoded = encodeEvent(payload)
+  for (const client of clients) {
+    try {
+      client.controller.enqueue(encoded)
+    } catch (error) {
+      if (error instanceof Error) {
+        clients.delete(client)
+      } else {
+        throw error
+      }
+    }
+  }
+}
+
+function closeAll(clients: Set<SseClient>): void {
+  for (const client of clients) {
+    try {
+      client.controller.close()
+    } catch (error) {
+      if (!(error instanceof Error)) throw error
+    }
+  }
+  clients.clear()
+}
+
+function encodeEvent(payload: unknown): Uint8Array {
+  return new TextEncoder().encode(`data: ${JSON.stringify(payload)}\n\n`)
 }
 
 /** Blocks DNS rebinding: only accepts requests addressed to loopback itself. */

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test"
 import { z } from "zod"
 import { DASHBOARD_HTML } from "./dashboard.ts"
-import { DashboardServer, isAllowedHost, type SessionControl } from "./server.ts"
+import { PANEL_PHASE_KEYS, type PanelChrome, type PanelSession, type PanelSnapshot } from "./panel-types.ts"
+import { DashboardServer, isAllowedHost, type PanelMapper, type SessionControl } from "./server.ts"
 import type { CommitSha, SessionId, SessionState, Watch } from "./types.ts"
 
 describe("isAllowedHost", () => {
@@ -218,6 +219,194 @@ describe("DashboardServer control routes", () => {
 
     expect(response.status).toBe(403)
     expect(calls).toEqual([])
+  })
+})
+
+const PANEL_PORT = TEST_PORT + 3
+
+function panelChrome(): PanelChrome {
+  return {
+    pageTitle: "CI Loop",
+    emptyWaiting: "Waiting for a push with CI…",
+    noMatches: "No session matches the current filters.",
+    searchPlaceholder: "Search sessions…",
+    filtersLabel: "Filters",
+    filterEnabledAll: "watch: all",
+    filterEnabledOn: "watch: on",
+    filterEnabledOff: "watch: off",
+    watchOn: "watch on",
+    watchOff: "watch off",
+    clearFilters: "clear",
+    hiddenTemplate: "{n} hidden by filters",
+    phaseChips: {
+      waiting: "waiting",
+      running: "running",
+      "done-green": "green",
+      "done-failed": "failed",
+      reviewing: "reviewing",
+      "review-ended": "review ended",
+      "timed-out": "timed out",
+      error: "error",
+    },
+  }
+}
+
+function panelSessionOf(state: SessionState): PanelSession {
+  return {
+    sessionID: state.sessionID,
+    title: "Fix the CI loop",
+    projectLabel: "repo",
+    directory: state.directory,
+    enabled: state.enabled,
+    watches: [],
+    searchText: "fix the ci loop",
+  }
+}
+
+const fakeMapper: PanelMapper = (sessions) => ({
+  chrome: panelChrome(),
+  sessions: sessions.map(panelSessionOf),
+})
+
+async function readSseFrame(url: string): Promise<unknown> {
+  const response = await fetch(url)
+  const reader = response.body?.getReader()
+  const chunk = await reader?.read()
+  await reader?.cancel()
+  const text = new TextDecoder().decode(chunk?.value)
+  return JSON.parse(text.replace(/^data: /, "").trim())
+}
+
+describe("DashboardServer panel routes", () => {
+  let server: DashboardServer | null = null
+
+  afterEach(() => {
+    server?.stop()
+    server = null
+  })
+
+  function startServer(mapper?: PanelMapper): string {
+    server = new DashboardServer({ enabled: true, host: "127.0.0.1", port: PANEL_PORT })
+    if (mapper) server.setPanelMapper(mapper)
+    server.start()
+    return `http://127.0.0.1:${PANEL_PORT}`
+  }
+
+  it("GET /panel/state returns the mapped panel snapshot", async () => {
+    const base = startServer(fakeMapper)
+    const state: SessionState = {
+      sessionID: "ses_panel" as SessionId,
+      enabled: true,
+      watches: [],
+      watch: null,
+      directory: "/repo",
+    }
+    server?.broadcast([state])
+
+    const response = await fetch(`${base}/panel/state`)
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      chrome: panelChrome(),
+      sessions: [panelSessionOf(state)],
+    } satisfies PanelSnapshot)
+  })
+
+  it("GET /panel/events streams the panel snapshot, not SessionState[]", async () => {
+    const base = startServer(fakeMapper)
+    const watch = waitingWatch("feature")
+    server?.broadcast([
+      {
+        sessionID: "ses_panel_sse" as SessionId,
+        enabled: true,
+        watches: [watch],
+        watch,
+        directory: "/repo",
+      },
+    ])
+
+    const frame = await readSseFrame(`${base}/panel/events`)
+
+    expect(Array.isArray(frame)).toBe(false)
+    const panel = frame as PanelSnapshot
+    expect(panel.chrome.pageTitle).toBe("CI Loop")
+    expect(panel.sessions.map((session) => session.sessionID)).toEqual(["ses_panel_sse"])
+    expect(JSON.stringify(frame)).not.toContain('"watches":[{')
+  })
+
+  it("falls back to an empty panel snapshot when no mapper is wired", async () => {
+    const base = startServer()
+    server?.broadcast([sessionState("ses_nomapper", true)])
+
+    const panel = (await (await fetch(`${base}/panel/state`)).json()) as PanelSnapshot
+
+    expect(panel.sessions).toEqual([])
+    expect(panel.chrome.pageTitle).toBeTruthy()
+    expect(panel.chrome.hiddenTemplate).toContain("{n}")
+    for (const key of PANEL_PHASE_KEYS) expect(panel.chrome.phaseChips[key]).toBeTruthy()
+  })
+
+  it("rejects non-loopback host headers on /panel routes", async () => {
+    const base = startServer(fakeMapper)
+    const headers = { host: `evil.example.com:${PANEL_PORT}` }
+
+    const state = await fetch(`${base}/panel/state`, { headers })
+    const events = await fetch(`${base}/panel/events`, { headers })
+
+    expect(state.status).toBe(403)
+    expect(events.status).toBe(403)
+  })
+
+  it("GET /state still returns a bare SessionState[] array with the original fields", async () => {
+    const base = startServer(fakeMapper)
+    const watch = waitingWatch("feature")
+    server?.broadcast([
+      {
+        sessionID: "ses_compat" as SessionId,
+        enabled: true,
+        watches: [watch],
+        watch,
+        directory: "/repo",
+      },
+    ])
+
+    const body = await (await fetch(`${base}/state`)).json()
+
+    expect(Array.isArray(body)).toBe(true)
+    const [first] = body as ReadonlyArray<Partial<SessionState>>
+    expect(Object.keys(first ?? {}).sort()).toEqual(["directory", "enabled", "sessionID", "watch", "watches"])
+    expect(first?.sessionID).toBe("ses_compat" as SessionId)
+  })
+
+  it("GET /events still streams SessionState[] after a panel mapper is wired", async () => {
+    const base = startServer(fakeMapper)
+    const watch = waitingWatch("feature")
+    server?.broadcast([
+      {
+        sessionID: "ses_events_compat" as SessionId,
+        enabled: true,
+        watches: [watch],
+        watch,
+        directory: "/repo",
+      },
+    ])
+
+    const frame = await readSseFrame(`${base}/events`)
+
+    expect(Array.isArray(frame)).toBe(true)
+    const sessions = frame as ReadonlyArray<Partial<SessionState>>
+    expect(Object.keys(sessions[0] ?? {}).sort()).toEqual([
+      "directory",
+      "enabled",
+      "sessionID",
+      "watch",
+      "watches",
+    ])
+    expect(JSON.stringify(frame)).not.toContain("chrome")
+  })
+
+  it("broadcast() keeps its single-argument signature", () => {
+    expect(DashboardServer.prototype.broadcast.length).toBe(1)
   })
 })
 
