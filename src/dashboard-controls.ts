@@ -2,7 +2,7 @@ import { PANEL_PHASE_KEYS } from "./panel-types.ts"
 
 /**
  * Controls half of the client JS (no <script> tags) — appended after DASHBOARD_SCRIPT inside the
- * ONE <script>, sharing its module scope (`esc`, `render`, `chrome`, `lastSnapshot`).
+ * ONE <script>, sharing its module scope (`esc`, `render`, `panelChrome`, `lastSnapshot`).
  *
  * Plan D7: `#controls` is filled exactly once (the `controlsBuilt` guard) and never reassigned;
  * filter state lives in module vars and every control change re-runs `render(lastSnapshot)`
@@ -21,7 +21,11 @@ function filterActive() {
   return query !== "" || phases.size > 0 || enabled !== "all";
 }
 function enabledLabel() {
-  return { all: chrome.filterEnabledAll, on: chrome.filterEnabledOn, off: chrome.filterEnabledOff }[enabled];
+  return {
+    all: panelChrome.filterEnabledAll,
+    on: panelChrome.filterEnabledOn,
+    off: panelChrome.filterEnabledOff,
+  }[enabled];
 }
 function filterSnapshot(snapshot, state) {
   const sessions = [];
@@ -46,15 +50,15 @@ function filterSnapshot(snapshot, state) {
   }
   return { sessions, hidden: baseline - visible };
 }
-function buildControls(chrome) {
+function buildControls(nextChrome) {
   if (controlsBuilt) return;
   controlsBuilt = true;
   const chips = PHASE_KEYS.map((key) =>
-    '<span class="chip" id="chip-' + key + '">' + esc(chrome.phaseChips[key]) + "</span>").join("");
+    '<span class="chip" id="chip-' + key + '">' + esc(nextChrome.phaseChips[key]) + "</span>").join("");
   document.getElementById("controls").innerHTML =
-    '<input id="search" type="search" placeholder="' + esc(chrome.searchPlaceholder) + '" />' + chips
+    '<input id="search" type="search" placeholder="' + esc(nextChrome.searchPlaceholder) + '" />' + chips
     + '<span class="chip" id="chip-enabled">' + esc(enabledLabel()) + "</span>"
-    + '<span class="chip" id="chip-clear">' + esc(chrome.clearFilters) + "</span>";
+    + '<span class="chip" id="chip-clear">' + esc(nextChrome.clearFilters) + "</span>";
   const search = document.getElementById("search");
   const enabledChip = document.getElementById("chip-enabled");
   search.addEventListener("input", () => {

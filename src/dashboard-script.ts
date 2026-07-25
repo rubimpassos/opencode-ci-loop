@@ -10,7 +10,9 @@
  * into the shared scope by the composed <script>.
  */
 export const DASHBOARD_SCRIPT = `const ICONS = { queued: "…", in_progress: "◐", completed: "" };
-let chrome = null;
+// NOT "chrome": Chromium's window.chrome is a non-configurable global, and a top-level
+// let/const shadowing one is a parse-time SyntaxError that kills the whole script.
+let panelChrome = null;
 let lastSnapshot = null;
 function esc(text) {
   return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -51,8 +53,8 @@ function watchView(watch) {
 }
 function sessionView(session) {
   const badge = session.enabled
-    ? '<span class="badge on">' + esc(chrome.watchOn) + "</span>"
-    : '<span class="badge off">' + esc(chrome.watchOff) + "</span>";
+    ? '<span class="badge on">' + esc(panelChrome.watchOn) + "</span>"
+    : '<span class="badge off">' + esc(panelChrome.watchOff) + "</span>";
   const project = session.projectLabel
     ? '<span class="project" title="' + esc(session.directory || "") + '">' + esc(session.projectLabel) + "</span>"
     : "";
@@ -62,7 +64,7 @@ function sessionView(session) {
     + session.watches.map(watchView).join("") + "</div>";
 }
 function applyChrome(next) {
-  chrome = next;
+  panelChrome = next;
   document.title = next.pageTitle;
   document.getElementById("title").textContent = next.pageTitle;
 }

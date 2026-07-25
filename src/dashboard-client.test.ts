@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test"
+import { runInThisContext } from "node:vm"
 import { DASHBOARD_CONTROLS } from "./dashboard-controls.ts"
 import { DASHBOARD_SCRIPT } from "./dashboard-script.ts"
 import {
@@ -558,6 +559,50 @@ describe("dashboard controls", () => {
     expect(app()).toContain("No session matches the current filters.")
     for (const write of writes) {
       expect(write.html).not.toContain("zzqueryzz")
+    }
+  })
+})
+
+describe("browser top-level parse semantics", () => {
+  it("parses as a classic top-level script against browser globals (window.chrome)", () => {
+    // Chromium ships `window.chrome` as a NON-CONFIGURABLE global property. For classic top-level
+    // scripts, GlobalDeclarationInstantiation → HasRestrictedGlobalProperty turns any top-level
+    // `let`/`const` shadowing such a property into a parse-time SyntaxError — the ENTIRE composed
+    // script is then dead (empty #app, empty title, zero JS). boot()'s `new Function` evaluates a
+    // FUNCTION BODY and `(0, eval)` gets its own lexical environment, so neither applies that
+    // check; `vm.runInThisContext` evaluates real GLOBAL SCRIPT code and does. The restricted
+    // global stays defined afterwards (non-configurable properties cannot be deleted, by
+    // definition) but is a harmless inert object no other test reads.
+    if (!Object.getOwnPropertyDescriptor(globalThis, "chrome")) {
+      Object.defineProperty(globalThis, "chrome", {
+        value: {},
+        writable: true,
+        enumerable: true,
+        configurable: false,
+      })
+    }
+    const dom = makeDom()
+    class NoopEventSource {
+      onopen: (() => void) | null = null
+      onerror: (() => void) | null = null
+      onmessage: ((event: { readonly data: string }) => void) | null = null
+      close(): void {}
+    }
+    const hadDocument = Object.hasOwn(globalThis, "document")
+    const hadEventSource = Object.hasOwn(globalThis, "EventSource")
+    const prevDocument: unknown = Reflect.get(globalThis, "document")
+    const prevEventSource: unknown = Reflect.get(globalThis, "EventSource")
+    Reflect.set(globalThis, "document", dom.document)
+    Reflect.set(globalThis, "EventSource", NoopEventSource)
+    try {
+      expect(() => runInThisContext(DASHBOARD_SCRIPT + DASHBOARD_CONTROLS)).not.toThrow()
+      // Evaluation completed: the script's own top-level `connect` reached the global scope.
+      expect(typeof Reflect.get(globalThis, "connect")).toBe("function")
+    } finally {
+      if (hadDocument) Reflect.set(globalThis, "document", prevDocument)
+      else Reflect.deleteProperty(globalThis, "document")
+      if (hadEventSource) Reflect.set(globalThis, "EventSource", prevEventSource)
+      else Reflect.deleteProperty(globalThis, "EventSource")
     }
   })
 })
