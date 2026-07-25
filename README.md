@@ -75,6 +75,7 @@ sequenceDiagram
 - **Per-session toggle** — `ci_watch` tool (`enable` / `disable` / `status`); tell the agent "turn off the ci loop" anytime
 - **TUI toasts** — `Waiting for CI…` → `CI: 1/2 completed` → `CI green/failed`, then review toasts (`Copilot review: 3 comments` → `All threads resolved`) — deduped per transition
 - **Live dashboard** — mini HTTP+SSE server at `http://127.0.0.1:4517` with a per-session panel
+- **Dashboard panel** — sessions labeled by their opencode title, search across titles/repos/branches/PRs, phase + watch filters, and the same PR readiness verdict the report injects (verdict + full blocker list, never a raw `mergeable` flag)
 - **Multi-project** — plugin instances across multiple worktrees share a single dashboard (per-port singleton)
 - **Fork-aware** — resolves the push repo via `@{push}` (`gh` alone resolves to the `upstream` remote on forks and misses the runs)
 
@@ -127,7 +128,7 @@ Or with options:
 | `dashboard.enabled` | `true` | Enables the visual panel server |
 | `dashboard.host` | `127.0.0.1` | Panel host (keep it on loopback) |
 | `dashboard.port` | `4517` | Panel port |
-| `language` | `"auto"` | Report/toast language; `"auto"` detects it from the session's messages. Supported: `en`, `pt-BR` |
+| `language` | `"auto"` | Language for reports, toasts **and the dashboard panel** (chrome, phase labels, PR blockers); `"auto"` detects it from the session's messages. Supported: `en`, `pt-BR` |
 | `review.enabled` | `true` | Watch PR review comments after CI settles |
 | `review.pollIntervalMs` | `30000` | Review-watch polling interval (min 5000) |
 | `review.idleTimeoutMs` | `3600000` (1h) | Stop watching after this long with no new review activity (re-armed on every update; min 60000) |
@@ -150,6 +151,17 @@ Open `http://127.0.0.1:4517` in OpenChamber's **browser/preview** panel to get t
 
 The **PR** tab in OpenChamber's git area also integrates with the plugin: a per-session "CI Monitor" toggle + live status badge (the OpenChamber server proxies to the dashboard; port configurable via `OPENCHAMBER_CI_LOOP_PORT`).
 
+### Dashboard panel
+
+The page renders a view model computed on the server and streamed over `/panel/events`. The client never re-derives status from raw fields, so the panel cannot drift from what the agent was told.
+
+- **Session title first** — the opencode session title is the primary label; the session id stays visible, muted, next to it. The title is fetched when a watch starts and refreshed live from the `session.updated` event; a session with no title yet falls back to its id.
+- **PR readiness, not raw fields** — the verdict and the **full blocker list** come from `prReadiness`, the same engine that builds the injected report, so the panel can no longer contradict the report. This replaces the old raw `state · draft · mergeable` line, which could read "mergeable" while the PR was actually blocked (draft, unresolved conversations, branch protection, failing checks…).
+- **External checks** — pending or failing PR checks that aren't Actions workflow runs (GitHub Apps, status contexts) are listed on the watch row.
+- **Search** — one box filters by session title, session id, project directory, repo, branch, PR number and PR title.
+- **Filters** — phase chips (`waiting`, `running`, `green`, `failed`, `reviewing`, `review ended`, `timed out`, `error`) plus a tri-state watch chip (`watch: all` → `watch: on` → `watch: off`). Chips and search combine; a counter reports how many rows the filters hid, a `clear` chip resets them, and a distinct empty state shows when nothing matches.
+- **Language** — the panel chrome follows the `language` option (`en` / `pt-BR`); under `"auto"`, each session's own rows render in that session's detected locale, so a multi-project panel can show both at once.
+
 ### Dashboard HTTP API
 
 All routes require a loopback `Host` (barrier against DNS rebinding).
@@ -161,6 +173,12 @@ All routes require a loopback `Host` (barrier against DNS rebinding).
 | `/events` | GET | SSE with live snapshots |
 | `/sessions/:id` | GET | State of one session (pure read; never-seen sessions inherit the `autoWatch` default) |
 | `/sessions/:id/enabled` | POST | Toggles the session's loop — body `{ "enabled": boolean }`, returns the new `SessionState` |
+| `/panel/state` | GET | **Panel-internal.** `PanelSnapshot` — the localized, fully-resolved view model the page renders |
+| `/panel/events` | GET | **Panel-internal.** SSE with live `PanelSnapshot` frames |
+
+`/state`, `/events`, `/sessions/:id` and `POST /sessions/:id/enabled` are **unchanged** — same `SessionState` payload, same shape, same semantics. The OpenChamber integration is unaffected.
+
+`/panel/state` and `/panel/events` are **internal to the built-in panel and not part of the OpenChamber contract**. Their `PanelSnapshot` payload is pre-localized and pre-resolved for that one page, and it may change with it — read `/state` and `/events` for the stable contract.
 
 ## Development
 
@@ -172,17 +190,38 @@ bun run check   # typecheck + biome + tests
 ## Architecture
 
 ```
-src/plugin.ts         # wiring: hooks, ci_watch tool, shared singleton
-src/registry.ts       # per-session state + CI watch loop + post-CI review loop (abortable)
-src/gh.ts             # gh/git integration (injectable exec, fork-aware)
-src/gh-review.ts      # PR review snapshot via gh GraphQL (threads, reviews, comments)
-src/review.ts         # pure review diff engine + review-cycle evaluator
-src/render.ts         # markdown CI report for the prompt + summaries + PR readiness
-src/render-review.ts  # markdown review update messages (mid-CI, post-CI, final)
-src/notify.ts         # toasts, prompt injection, fingerprint dedupe, locale resolution
-src/i18n.ts           # en / pt-BR message catalogs + language detection
-src/server.ts         # dashboard HTTP+SSE
-src/dashboard.ts      # panel page
+# core loop
+src/plugin.ts             # wiring: hooks, ci_watch tool, shared singleton, session-title cache
+src/registry.ts           # per-session state + CI watch loop + post-CI review loop (abortable)
+src/resolve.ts            # parses `git push` output into watch targets (worktrees, external repos)
+src/types.ts              # domain types + the zod config schema
+src/session-context.ts    # session model + locale lookup via the opencode client
+
+# GitHub
+src/gh.ts                 # gh/git integration (injectable exec, fork-aware)
+src/gh-review.ts          # PR review snapshot via gh GraphQL (threads, reviews, comments)
+src/review.ts             # pure review diff engine + review-cycle evaluator
+
+# reports and notifications
+src/render.ts             # markdown CI report + summaries + prReadiness + externalChecks
+src/render-review.ts      # markdown review update messages (mid-CI, post-CI, final)
+src/notify.ts             # toasts, prompt injection, fingerprint dedupe, locale resolution
+src/notify-review.ts      # review fingerprints (keyed by PR) + unseen-delta filtering
+
+# i18n
+src/i18n.ts               # Messages contract, catalog registry, detection + resolution
+src/i18n-en.ts            # English catalog
+src/i18n-pt-br.ts         # Brazilian Portuguese catalog
+
+# dashboard
+src/server.ts             # dashboard HTTP+SSE (/state, /events, /panel/*, session control)
+src/panel-types.ts        # PanelSnapshot view-model contract (phase keys, tones, chrome)
+src/panel-view.ts         # projects SessionState[] into the localized PanelSnapshot
+src/panel-locale.ts       # panel chrome locale + chrome builder
+src/dashboard.ts          # panel HTML shell composing styles + script + controls
+src/dashboard-styles.ts   # panel CSS (dark GitHub-ish; tone → color)
+src/dashboard-script.ts   # client renderer: escapes and paints the snapshot, SSE reconnect
+src/dashboard-controls.ts # client search box + phase/watch filter chips
 ```
 
 No runtime dependencies beyond `@opencode-ai/plugin`. Strictly typed, tested with `bun test`.
