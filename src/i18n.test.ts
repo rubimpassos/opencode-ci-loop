@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test"
 import { CATALOGS, detectLocale, LOCALES, type Locale, resolveLocale } from "./i18n.ts"
 import { EN } from "./i18n-en.ts"
 import { PT_BR } from "./i18n-pt-br.ts"
+import { PANEL_PHASE_KEYS } from "./panel-types.ts"
 
 describe("detectLocale", () => {
   const table: readonly { readonly text: string; readonly expected: Locale }[] = [
@@ -134,6 +135,32 @@ for (const locale of LOCALES) {
       expect(warning).toContain("150")
       expect(warning).toContain("100")
     })
+
+    it("carries every panel chrome key", () => {
+      expect(messages.panelPageTitle).toBeTruthy()
+      expect(messages.panelEmptyWaiting).toBeTruthy()
+      expect(messages.panelNoMatches).toBeTruthy()
+      expect(messages.panelSearchPlaceholder).toBeTruthy()
+      expect(messages.panelFiltersLabel).toBeTruthy()
+      expect(messages.panelFilterEnabledAll).toBeTruthy()
+      expect(messages.panelFilterEnabledOn).toBeTruthy()
+      expect(messages.panelFilterEnabledOff).toBeTruthy()
+      expect(messages.panelWatchOn).toBeTruthy()
+      expect(messages.panelWatchOff).toBeTruthy()
+      expect(messages.panelClearFilters).toBeTruthy()
+      expect(messages.panelDraft).toBeTruthy()
+      expect(messages.panelOtherChecks).toBeTruthy()
+      expect(messages.panelPhaseWaiting).toBeTruthy()
+      expect(messages.panelPhaseRunning).toBeTruthy()
+      expect(messages.panelPhaseCiGreen).toBeTruthy()
+      expect(messages.panelPhaseCiFailed).toBeTruthy()
+      expect(messages.panelPhaseTimedOut).toBeTruthy()
+      for (const key of PANEL_PHASE_KEYS) expect(messages.panelPhaseChip(key)).toBeTruthy()
+      expect(messages.panelHiddenTemplate).toContain("{n}")
+      expect(messages.panelWatchingReviews(5)).toContain("5")
+      expect(messages.panelReviewEnded("merged")).toContain("merged")
+      expect(messages.panelPhaseError("boom")).toContain("boom")
+    })
   })
 }
 
@@ -201,6 +228,24 @@ describe("CATALOGS[pt-BR]", () => {
     expect(ptBR.reviewMidCiInstruction).not.toBe(CATALOGS.en.reviewMidCiInstruction)
     expect(ptBR.reviewKeepsWatching).not.toBe(CATALOGS.en.reviewKeepsWatching)
     expect(ptBR.reviewAddressInstruction).not.toBe(CATALOGS.en.reviewAddressInstruction)
+  })
+
+  it("localizes panel chrome away from English in pt-BR", () => {
+    const en = CATALOGS.en
+    expect(ptBR.panelEmptyWaiting).not.toBe(en.panelEmptyWaiting)
+    expect(ptBR.panelNoMatches).not.toBe(en.panelNoMatches)
+    expect(ptBR.panelSearchPlaceholder).not.toBe(en.panelSearchPlaceholder)
+    expect(ptBR.panelFiltersLabel).not.toBe(en.panelFiltersLabel)
+    expect(ptBR.panelClearFilters).not.toBe(en.panelClearFilters)
+    expect(ptBR.panelWatchOn).not.toBe(en.panelWatchOn)
+    expect(ptBR.panelOtherChecks).not.toBe(en.panelOtherChecks)
+    expect(ptBR.panelPhaseRunning).not.toBe(en.panelPhaseRunning)
+    expect(ptBR.panelPhaseChip("done-failed")).not.toBe(en.panelPhaseChip("done-failed"))
+    expect(ptBR.panelPhaseError("boom")).not.toBe(en.panelPhaseError("boom"))
+    expect(ptBR.panelHiddenTemplate).not.toBe(en.panelHiddenTemplate)
+    expect(ptBR.panelHiddenTemplate).toContain("{n}")
+    expect(ptBR.panelReviewEnded("merged")).not.toBe(en.panelReviewEnded("merged"))
+    expect(ptBR.panelReviewEnded("merged")).toContain("merged")
   })
 })
 

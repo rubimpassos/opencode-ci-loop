@@ -1,4 +1,5 @@
 import type { Messages } from "./i18n.ts"
+import { assertNever } from "./types.ts"
 
 export const EN: Messages = {
   toastWaiting: (context) => `Waiting for CI to start… · ${context}`,
@@ -84,4 +85,50 @@ export const EN: Messages = {
   toastReviewIdle: (prNumber) => `Review watch idle — stopped watching PR #${prNumber}`,
   toastPrMerged: (prNumber) => `PR #${prNumber} merged — review watch ended`,
   toastPrClosed: (prNumber) => `PR #${prNumber} closed — review watch ended`,
+
+  panelPageTitle: "CI Loop",
+  panelEmptyWaiting: "Waiting for a push with CI…",
+  panelNoMatches: "No session matches the current filters.",
+  panelSearchPlaceholder: "Search sessions, repos, branches, PRs…",
+  panelFiltersLabel: "Filters",
+  panelFilterEnabledAll: "watch: all",
+  panelFilterEnabledOn: "watch: on",
+  panelFilterEnabledOff: "watch: off",
+  panelWatchOn: "watch on",
+  panelWatchOff: "watch off",
+  panelClearFilters: "clear",
+  panelHiddenTemplate: "{n} hidden by filters",
+  panelDraft: "draft",
+  panelOtherChecks: "Other checks",
+
+  panelPhaseWaiting: "Waiting for CI to start…",
+  panelPhaseRunning: "CI running",
+  panelPhaseCiGreen: "✓ CI green",
+  panelPhaseCiFailed: "✗ CI failed",
+  panelPhaseTimedOut: "Timed out waiting for CI",
+  panelPhaseError: (message) => `Error: ${message}`,
+  panelWatchingReviews: (unresolved) => `👀 watching reviews · ${unresolved} unresolved`,
+  panelReviewEnded: (reason) => `review watch ended (${reason})`,
+  panelPhaseChip: (key) => {
+    switch (key) {
+      case "waiting":
+        return "waiting"
+      case "running":
+        return "running"
+      case "done-green":
+        return "green"
+      case "done-failed":
+        return "failed"
+      case "reviewing":
+        return "reviewing"
+      case "review-ended":
+        return "review ended"
+      case "timed-out":
+        return "timed out"
+      case "error":
+        return "error"
+      default:
+        return assertNever(key)
+    }
+  },
 }

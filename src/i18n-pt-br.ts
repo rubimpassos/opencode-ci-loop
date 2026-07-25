@@ -1,4 +1,5 @@
 import type { Messages } from "./i18n.ts"
+import { assertNever } from "./types.ts"
 
 export const PT_BR: Messages = {
   toastWaiting: (context) => `Aguardando o CI iniciar… · ${context}`,
@@ -84,4 +85,50 @@ export const PT_BR: Messages = {
   toastReviewIdle: (prNumber) => `Monitoramento de review ocioso — parei de monitorar o PR #${prNumber}`,
   toastPrMerged: (prNumber) => `PR #${prNumber} mergeado — monitoramento de review encerrado`,
   toastPrClosed: (prNumber) => `PR #${prNumber} fechado — monitoramento de review encerrado`,
+
+  panelPageTitle: "CI Loop",
+  panelEmptyWaiting: "Aguardando um push com CI…",
+  panelNoMatches: "Nenhuma sessão corresponde aos filtros atuais.",
+  panelSearchPlaceholder: "Buscar sessões, repos, branches, PRs…",
+  panelFiltersLabel: "Filtros",
+  panelFilterEnabledAll: "watch: todos",
+  panelFilterEnabledOn: "watch: ligado",
+  panelFilterEnabledOff: "watch: desligado",
+  panelWatchOn: "watch ligado",
+  panelWatchOff: "watch desligado",
+  panelClearFilters: "limpar",
+  panelHiddenTemplate: "{n} ocultos pelos filtros",
+  panelDraft: "draft",
+  panelOtherChecks: "Outros checks",
+
+  panelPhaseWaiting: "Aguardando o CI iniciar…",
+  panelPhaseRunning: "CI rodando",
+  panelPhaseCiGreen: "✓ CI verde",
+  panelPhaseCiFailed: "✗ CI falhou",
+  panelPhaseTimedOut: "Tempo esgotado aguardando o CI",
+  panelPhaseError: (message) => `Erro: ${message}`,
+  panelWatchingReviews: (unresolved) => `👀 monitorando reviews · ${unresolved} não resolvidas`,
+  panelReviewEnded: (reason) => `monitoramento de review encerrado (${reason})`,
+  panelPhaseChip: (key) => {
+    switch (key) {
+      case "waiting":
+        return "aguardando"
+      case "running":
+        return "rodando"
+      case "done-green":
+        return "verde"
+      case "done-failed":
+        return "falhou"
+      case "reviewing":
+        return "em review"
+      case "review-ended":
+        return "review encerrado"
+      case "timed-out":
+        return "tempo esgotado"
+      case "error":
+        return "erro"
+      default:
+        return assertNever(key)
+    }
+  },
 }

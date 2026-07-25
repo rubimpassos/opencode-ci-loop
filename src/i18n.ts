@@ -1,5 +1,7 @@
 import { EN } from "./i18n-en.ts"
 import { PT_BR } from "./i18n-pt-br.ts"
+import type { PanelPhaseKey } from "./panel-types.ts"
+import type { ReviewEndReason } from "./types.ts"
 
 export const LOCALES = ["en", "pt-BR"] as const
 export type Locale = (typeof LOCALES)[number]
@@ -82,6 +84,35 @@ export interface Messages {
   toastReviewIdle(prNumber: number): string
   toastPrMerged(prNumber: number): string
   toastPrClosed(prNumber: number): string
+
+  // Dashboard panel chrome (panel-view.ts buildChrome + the per-watch labels)
+  readonly panelPageTitle: string
+  readonly panelEmptyWaiting: string
+  readonly panelNoMatches: string
+  readonly panelSearchPlaceholder: string
+  readonly panelFiltersLabel: string
+  readonly panelFilterEnabledAll: string
+  readonly panelFilterEnabledOn: string
+  readonly panelFilterEnabledOff: string
+  readonly panelWatchOn: string
+  readonly panelWatchOff: string
+  readonly panelClearFilters: string
+  /** Carries the literal `{n}` token — the client substitutes the hidden-row count it computes. */
+  readonly panelHiddenTemplate: string
+  readonly panelDraft: string
+  readonly panelOtherChecks: string
+
+  // Dashboard panel phase labels
+  readonly panelPhaseWaiting: string
+  readonly panelPhaseRunning: string
+  readonly panelPhaseCiGreen: string
+  readonly panelPhaseCiFailed: string
+  readonly panelPhaseTimedOut: string
+  panelPhaseError(message: string): string
+  panelWatchingReviews(unresolved: number): string
+  panelReviewEnded(reason: ReviewEndReason): string
+  /** Short filter-chip label — distinct from the long panelPhase* strings on the watch row. */
+  panelPhaseChip(key: PanelPhaseKey): string
 }
 
 export const CATALOGS: Record<Locale, Messages> = { en: EN, "pt-BR": PT_BR }
