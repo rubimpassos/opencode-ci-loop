@@ -1,6 +1,8 @@
 import { z } from "zod"
 import { DASHBOARD_HTML } from "./dashboard.ts"
-import type { PanelChrome, PanelSnapshot } from "./panel-types.ts"
+import { CATALOGS } from "./i18n.ts"
+import type { PanelSnapshot } from "./panel-types.ts"
+import { buildChrome } from "./panel-view.ts"
 import type { PluginConfig, SessionState } from "./types.ts"
 
 type SseClient = {
@@ -16,33 +18,8 @@ export type SessionControl = {
 /** Projects the frozen `SessionState[]` snapshot into the panel view model. Injected by the plugin. */
 export type PanelMapper = (sessions: readonly SessionState[]) => PanelSnapshot
 
-// TODO(T6): source from CATALOGS once the panel chrome keys land; T6 owns the real buildChrome.
-const EMPTY_PANEL_CHROME: PanelChrome = {
-  pageTitle: "CI Loop",
-  emptyWaiting: "Waiting for a push with CI…",
-  noMatches: "No session matches the current filters.",
-  searchPlaceholder: "Search sessions, repos, branches, PRs…",
-  filtersLabel: "Filters",
-  filterEnabledAll: "watch: all",
-  filterEnabledOn: "watch: on",
-  filterEnabledOff: "watch: off",
-  watchOn: "watch on",
-  watchOff: "watch off",
-  clearFilters: "clear",
-  hiddenTemplate: "{n} hidden by filters",
-  phaseChips: {
-    waiting: "waiting",
-    running: "running",
-    "done-green": "green",
-    "done-failed": "failed",
-    reviewing: "reviewing",
-    "review-ended": "review ended",
-    "timed-out": "timed out",
-    error: "error",
-  },
-}
-
-const EMPTY_PANEL: PanelSnapshot = { chrome: EMPTY_PANEL_CHROME, sessions: [] }
+/** Served until the plugin wires its mapper; English because no session has claimed a locale yet. */
+const EMPTY_PANEL: PanelSnapshot = { chrome: buildChrome(CATALOGS.en), sessions: [] }
 
 const emptyPanelMapper: PanelMapper = () => EMPTY_PANEL
 
