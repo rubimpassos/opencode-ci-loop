@@ -1,10 +1,13 @@
+import { DASHBOARD_CONTROLS } from "./dashboard-controls.ts"
 import { DASHBOARD_SCRIPT } from "./dashboard-script.ts"
 import { DASHBOARD_STYLES } from "./dashboard-styles.ts"
 
 /**
  * Single-page CI dashboard — consumes /panel/events (SSE) and renders the server view model.
  * Zero hardcoded user-facing text: the chrome (title, labels, empty state) arrives with the
- * first SSE frame. `#controls` is a static placeholder the controls script (T9) fills once.
+ * first SSE frame. `#controls` is a static placeholder the controls script fills exactly once
+ * (plan D7); the ONE <script> composes DASHBOARD_SCRIPT + DASHBOARD_CONTROLS in a shared scope,
+ * controls last so it can call `render`.
  */
 export const DASHBOARD_HTML = `<!doctype html>
 <html lang="en">
@@ -18,9 +21,10 @@ ${DASHBOARD_STYLES}</style>
 <body>
 <h1><span class="dot" id="conn"></span><span id="title"></span></h1>
 <div id="controls"></div>
+<div id="hidden"></div>
 <div id="app"></div>
 <script>
-${DASHBOARD_SCRIPT}</script>
+${DASHBOARD_SCRIPT}${DASHBOARD_CONTROLS}</script>
 </body>
 </html>
 `

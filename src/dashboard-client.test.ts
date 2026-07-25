@@ -1,30 +1,59 @@
 import { describe, expect, it } from "bun:test"
+import { DASHBOARD_CONTROLS } from "./dashboard-controls.ts"
 import { DASHBOARD_SCRIPT } from "./dashboard-script.ts"
-import type { PanelChrome, PanelPr, PanelSession, PanelSnapshot, PanelWatch } from "./panel-types.ts"
+import {
+  PANEL_PHASE_KEYS,
+  type PanelChrome,
+  type PanelPr,
+  type PanelSession,
+  type PanelSnapshot,
+  type PanelWatch,
+} from "./panel-types.ts"
 
 type StubEl = {
   innerHTML: string
   textContent: string
   className: string
-  readonly classList: { add(name: string): void; remove(name: string): void }
+  value: string
+  readonly classList: { add(name: string): void; remove(name: string): void; contains(name: string): boolean }
+  addEventListener(type: string, handler: () => void): void
 }
+
+type InnerHtmlWrite = { readonly id: string; readonly html: string }
 
 function makeDom() {
   const els = new Map<string, StubEl>()
+  const writes: InnerHtmlWrite[] = []
+  const listeners = new Map<string, () => void>()
   const el = (id: string): StubEl => {
     const existing = els.get(id)
     if (existing) return existing
+    let html = ""
+    const classes = new Set<string>()
     const created: StubEl = {
-      innerHTML: "",
+      get innerHTML() {
+        return html
+      },
+      set innerHTML(next: string) {
+        html = next
+        writes.push({ id, html: next })
+      },
       textContent: "",
       className: "",
-      classList: { add: () => {}, remove: () => {} },
+      value: "",
+      classList: {
+        add: (name) => classes.add(name),
+        remove: (name) => classes.delete(name),
+        contains: (name) => classes.has(name),
+      },
+      addEventListener: (type, handler) => listeners.set(`${id}:${type}`, handler),
     }
     els.set(id, created)
     return created
   }
   const document = { title: "", getElementById: (id: string) => el(id) }
-  return { document, el }
+  const fire = (id: string, type: string): void => listeners.get(`${id}:${type}`)?.()
+  return { document, el, fire, writes }
 }
 
 function boot() {
@@ -42,12 +71,44 @@ function boot() {
     }
     close(): void {}
   }
-  new Function("document", "EventSource", DASHBOARD_SCRIPT)(dom.document, StubEventSource)
+  const timers = new Map<number, { fn: () => void; live: boolean }>()
+  let nextTimer = 0
+  const stubSetTimeout = (fn: () => void, _ms: number): number => {
+    nextTimer += 1
+    timers.set(nextTimer, { fn, live: true })
+    return nextTimer
+  }
+  const stubClearTimeout = (id: number): void => {
+    const timer = timers.get(id)
+    if (timer) timer.live = false
+  }
+  const flush = (): void => {
+    const due = [...timers.values()]
+    timers.clear()
+    for (const timer of due) if (timer.live) timer.fn()
+  }
+  new Function(
+    "document",
+    "EventSource",
+    "setTimeout",
+    "clearTimeout",
+    DASHBOARD_SCRIPT + DASHBOARD_CONTROLS,
+  )(dom.document, StubEventSource, stubSetTimeout, stubClearTimeout)
   return {
     dom,
     urls,
+    flush,
+    fire: dom.fire,
+    writes: dom.writes,
     push: (snapshot: PanelSnapshot) => onmessage?.({ data: JSON.stringify(snapshot) }),
     app: () => dom.el("app").innerHTML,
+    hidden: () => dom.el("hidden").textContent,
+    typeQuery: (text: string) => {
+      dom.el("search").value = text
+      dom.fire("search", "input")
+      flush()
+    },
+    controlsWrites: () => dom.writes.filter((write) => write.id === "controls").length,
   }
 }
 
@@ -123,6 +184,29 @@ function makeSession(overrides: Partial<PanelSession> = {}): PanelSession {
 
 function makeSnapshot(sessions: readonly PanelSession[], chrome: PanelChrome = makeChrome()): PanelSnapshot {
   return { chrome, sessions }
+}
+
+/** Server-built haystack carrying every searchable field of the plan's S11 table. */
+const MATCH_HAYSTACK =
+  "fix the ci loop ses_06f7 /home/user/opencode-ci-loop github.com/o/r feat/panel #3603 dashboard divergence"
+
+function matchingSession(overrides: Partial<PanelSession> = {}): PanelSession {
+  return makeSession({
+    watches: [makeWatch({ phaseKey: "reviewing", tone: "info", searchText: MATCH_HAYSTACK })],
+    ...overrides,
+  })
+}
+
+function unrelatedSession(overrides: Partial<PanelSession> = {}): PanelSession {
+  return makeSession({
+    sessionID: "ses_zzz9",
+    title: "Unrelated",
+    projectLabel: "other-app",
+    directory: "/home/user/other-app",
+    searchText: "unrelated ses_zzz9 /home/user/other-app",
+    watches: [makeWatch({ key: "other.example/x\0main", searchText: "unrelated other.example/x main row" })],
+    ...overrides,
+  })
 }
 
 describe("dashboard client", () => {
@@ -265,5 +349,215 @@ describe("dashboard client", () => {
 
     expect(app()).toContain("Aguardando um push com CI…")
     expect(app()).not.toContain("Waiting for a push")
+  })
+})
+
+describe("dashboard controls", () => {
+  it("builds the search box and the phase chips in PANEL_PHASE_KEYS order on the first frame", () => {
+    const { push, dom } = boot()
+
+    push(makeSnapshot([matchingSession()]))
+
+    const controls = dom.el("controls").innerHTML
+    expect(controls).toContain('placeholder="Search sessions…"')
+    expect(controls).toContain('id="chip-enabled"')
+    expect(controls).toContain('id="chip-clear"')
+    expect(controls).toContain(">review ended</span>")
+    const positions = PANEL_PHASE_KEYS.map((key) => controls.indexOf(`id="chip-${key}"`))
+    for (const position of positions) expect(position).toBeGreaterThan(-1)
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions)
+  })
+
+  it.each([
+    ["fix the ci", "title"],
+    ["ses_06f7", "id"],
+    ["opencode-ci-loop", "directory"],
+    ["github.com/o/r", "repo"],
+    ["feat/panel", "branch"],
+    ["#3603", "pr number"],
+    ["dashboard divergence", "pr title"],
+  ])("search %j matches by %s (S11)", (query) => {
+    const { push, app, typeQuery } = boot()
+    push(makeSnapshot([matchingSession(), unrelatedSession()]))
+
+    typeQuery(query)
+
+    expect(app()).toContain("Fix the CI loop")
+    expect(app()).not.toContain("Unrelated")
+  })
+
+  it("matches a watchless session by its own searchText (S11)", () => {
+    const { push, app, typeQuery } = boot()
+    push(makeSnapshot([makeSession(), unrelatedSession()]))
+
+    typeQuery("ses_06f7")
+
+    expect(app()).toContain("Fix the CI loop")
+    expect(app()).not.toContain("Unrelated")
+  })
+
+  it("search is case-insensitive and debounced", () => {
+    const { push, app, dom, fire, flush } = boot()
+    push(makeSnapshot([matchingSession(), unrelatedSession()]))
+
+    dom.el("search").value = "FIX THE CI"
+    fire("search", "input")
+
+    expect(app()).toContain("Unrelated")
+
+    flush()
+
+    expect(app()).toContain("Fix the CI loop")
+    expect(app()).not.toContain("Unrelated")
+  })
+
+  it("phase chips filter to the selected phases (S12)", () => {
+    const { push, app, fire } = boot()
+    push(makeSnapshot([matchingSession(), unrelatedSession()]))
+
+    fire("chip-reviewing", "click")
+
+    expect(app()).toContain("Fix the CI loop")
+    expect(app()).not.toContain("Unrelated")
+
+    fire("chip-done-failed", "click")
+
+    expect(app()).toContain("Fix the CI loop")
+    expect(app()).toContain("Unrelated")
+
+    fire("chip-reviewing", "click")
+
+    expect(app()).not.toContain("Fix the CI loop")
+    expect(app()).toContain("Unrelated")
+  })
+
+  it("the enabled chip cycles all → on → off (S12)", () => {
+    const { push, app, dom, fire } = boot()
+    push(makeSnapshot([matchingSession(), unrelatedSession({ enabled: false })]))
+
+    fire("chip-enabled", "click")
+    expect(dom.el("chip-enabled").textContent).toBe("watch: on")
+    expect(app()).toContain("Fix the CI loop")
+    expect(app()).not.toContain("Unrelated")
+
+    fire("chip-enabled", "click")
+    expect(dom.el("chip-enabled").textContent).toBe("watch: off")
+    expect(app()).not.toContain("Fix the CI loop")
+    expect(app()).toContain("Unrelated")
+
+    fire("chip-enabled", "click")
+    expect(dom.el("chip-enabled").textContent).toBe("watch: all")
+    expect(app()).toContain("Fix the CI loop")
+    expect(app()).toContain("Unrelated")
+  })
+
+  it("search AND phase AND enabled combine (S12)", () => {
+    const { push, app, typeQuery, fire } = boot()
+    const wrongPhase = matchingSession({
+      sessionID: "ses_phase",
+      title: "Wrong phase",
+      watches: [makeWatch({ phaseKey: "done-failed", searchText: MATCH_HAYSTACK })],
+    })
+    const wrongEnabled = matchingSession({ sessionID: "ses_off", title: "Watch off", enabled: false })
+    const wrongQuery = matchingSession({
+      sessionID: "ses_q",
+      title: "Wrong query",
+      watches: [makeWatch({ phaseKey: "reviewing", searchText: "no match here" })],
+    })
+    push(makeSnapshot([matchingSession(), wrongPhase, wrongEnabled, wrongQuery]))
+
+    typeQuery("#3603")
+    fire("chip-reviewing", "click")
+    fire("chip-enabled", "click")
+
+    expect(app()).toContain("Fix the CI loop")
+    expect(app()).not.toContain("Wrong phase")
+    expect(app()).not.toContain("Watch off")
+    expect(app()).not.toContain("Wrong query")
+  })
+
+  it("shows the hidden count from chrome.hiddenTemplate when filters are active (S12)", () => {
+    const { push, hidden, typeQuery } = boot()
+    const bare = makeSession({ sessionID: "ses_bare", title: "Bare", searchText: "bare ses_bare" })
+    push(makeSnapshot([matchingSession(), unrelatedSession(), bare]))
+
+    expect(hidden()).toBe("")
+
+    typeQuery("#3603")
+
+    expect(hidden()).toBe("2 hidden by filters")
+  })
+
+  it("shows chrome.noMatches when nothing matches (S12)", () => {
+    const { push, app, typeQuery } = boot()
+    push(makeSnapshot([matchingSession(), unrelatedSession()]))
+
+    typeQuery("zzz-no-such-thing")
+
+    expect(app()).toContain("No session matches the current filters.")
+    expect(app()).not.toContain("Waiting for a push")
+    expect(app()).not.toContain("session-title")
+  })
+
+  it("the clear button resets the query, the phases and the enabled filter", () => {
+    const { push, app, dom, typeQuery, fire, hidden } = boot()
+    push(makeSnapshot([matchingSession(), unrelatedSession({ enabled: false })]))
+
+    typeQuery("#3603")
+    fire("chip-reviewing", "click")
+    fire("chip-enabled", "click")
+    expect(app()).not.toContain("Unrelated")
+
+    fire("chip-clear", "click")
+
+    expect(dom.el("search").value).toBe("")
+    expect(app()).toContain("Fix the CI loop")
+    expect(app()).toContain("Unrelated")
+    expect(hidden()).toBe("")
+  })
+
+  it("keeps the query, the chips and the input value across an SSE re-render (S13)", () => {
+    const { push, app, dom, typeQuery, fire, controlsWrites } = boot()
+    push(makeSnapshot([matchingSession(), unrelatedSession()]))
+
+    typeQuery("fix the ci")
+    fire("chip-reviewing", "click")
+    expect(app()).not.toContain("Unrelated")
+
+    push(makeSnapshot([matchingSession(), unrelatedSession()]))
+
+    expect(app()).toContain("Fix the CI loop")
+    expect(app()).not.toContain("Unrelated")
+    expect(dom.el("search").value).toBe("fix the ci")
+    expect(dom.el("chip-reviewing").classList.contains("active")).toBe(true)
+    expect(controlsWrites()).toBe(1)
+  })
+
+  it("never reassigns #controls.innerHTML after boot (S13)", () => {
+    const { push, typeQuery, fire, controlsWrites } = boot()
+    push(makeSnapshot([matchingSession(), unrelatedSession()]))
+    expect(controlsWrites()).toBe(1)
+
+    typeQuery("ses_06f7")
+    fire("chip-running", "click")
+    fire("chip-running", "click")
+    fire("chip-enabled", "click")
+    fire("chip-clear", "click")
+    push(makeSnapshot([unrelatedSession()]))
+    push(makeSnapshot([], makeChrome({ pageTitle: "Loop de CI" })))
+
+    expect(controlsWrites()).toBe(1)
+  })
+
+  it("never writes the query into innerHTML (S14)", () => {
+    const { push, app, typeQuery, writes } = boot()
+    push(makeSnapshot([matchingSession(), unrelatedSession()]))
+
+    typeQuery('<script>zzqueryzz("pwn")</script>')
+
+    expect(app()).toContain("No session matches the current filters.")
+    for (const write of writes) {
+      expect(write.html).not.toContain("zzqueryzz")
+    }
   })
 })

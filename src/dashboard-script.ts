@@ -5,7 +5,9 @@
  * The client is deliberately dumb (plan D2): it renders the server-computed `PanelSnapshot`
  * unconditionally — meta, phase label, runs, checks, failures, PR — with ZERO branching on
  * `phaseKey`, so no phase can ever lose its runs or PR again. All user-controlled fields go
- * through `esc()`. `lastSnapshot` and the module scope are extended by the controls script (T9).
+ * through `esc()`. `render()` only ever touches `#app` and `#hidden` (plan D7); the filtering
+ * itself (`buildControls`, `filterSnapshot`, `filterActive`) lives in DASHBOARD_CONTROLS, hoisted
+ * into the shared scope by the composed <script>.
  */
 export const DASHBOARD_SCRIPT = `const ICONS = { queued: "…", in_progress: "◐", completed: "" };
 let chrome = null;
@@ -67,12 +69,21 @@ function applyChrome(next) {
 function render(snapshot) {
   lastSnapshot = snapshot;
   applyChrome(snapshot.chrome);
+  buildControls(snapshot.chrome);
   const app = document.getElementById("app");
+  const hidden = document.getElementById("hidden");
   if (snapshot.sessions.length === 0) {
+    hidden.textContent = "";
     app.innerHTML = '<div class="empty">' + esc(snapshot.chrome.emptyWaiting) + "</div>";
     return;
   }
-  app.innerHTML = snapshot.sessions.map(sessionView).join("");
+  const filtered = filterSnapshot(snapshot, { query, phases, enabled });
+  hidden.textContent = filterActive()
+    ? snapshot.chrome.hiddenTemplate.replace("{n}", String(filtered.hidden))
+    : "";
+  app.innerHTML = filtered.sessions.length === 0
+    ? '<div class="empty">' + esc(snapshot.chrome.noMatches) + "</div>"
+    : filtered.sessions.map(sessionView).join("");
 }
 function connect() {
   const source = new EventSource("/panel/events");

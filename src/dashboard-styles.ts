@@ -9,6 +9,13 @@ export const DASHBOARD_STYLES = `  :root {
   h1 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
   h1 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
   h1 .dot.off { background: var(--red); }
+  #controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  #search { background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 4px 8px; font: inherit; min-width: 260px; }
+  .chip { border: 1px solid var(--border); border-radius: 999px; padding: 1px 10px; font-size: 12px;
+    color: var(--muted); cursor: pointer; user-select: none; }
+  .chip.active { color: var(--blue); border-color: var(--blue); }
+  #hidden { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
   .empty { color: var(--muted); padding: 24px 0; }
   .session { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
     padding: 12px; margin-bottom: 12px; }
