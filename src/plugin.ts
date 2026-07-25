@@ -2,6 +2,7 @@ import { type Plugin, tool } from "@opencode-ai/plugin"
 import { bunExec, GhClient } from "./gh.ts"
 import type { Locale } from "./i18n.ts"
 import { clearSessionNotifications, type NotifyContext, notifyPhase, notifyReviewUpdate } from "./notify.ts"
+import { buildPanelSnapshot } from "./panel-view.ts"
 import { WatchRegistry } from "./registry.ts"
 import { renderWatchNotice } from "./render.ts"
 import { resolvePushTargets } from "./resolve.ts"
@@ -29,6 +30,10 @@ type SharedCiLoop = {
   client: OpencodeClient
   readonly notifications: Set<string>
   readonly locales: Map<SessionId, Locale>
+  /** Panel-only label cache. Deliberately NOT on `SessionState` — `/state` stays byte-identical. */
+  readonly titles: Map<SessionId, string>
+  /** Pushes the current registry state to the dashboard; the panel mapper runs inside `broadcast`. */
+  readonly publish: () => void
 }
 
 const SHARED_KEY = Symbol.for("opencode-ci-loop.shared")
@@ -57,6 +62,7 @@ export function acquireShared(config: PluginConfig, client: OpencodeClient): Sha
   const dashboard = new DashboardServer(config.dashboard)
   const notifications = new Set<string>()
   const locales = new Map<SessionId, Locale>()
+  const titles = new Map<SessionId, string>()
   // Rebuilt per event so notifications always use the most recent client instance.
   const ctx = (): NotifyContext => ({ client: shared.client, notifications, locales, config })
 
@@ -67,7 +73,17 @@ export function acquireShared(config: PluginConfig, client: OpencodeClient): Sha
       notifyReviewUpdate(ctx(), sessionID, watch, update, signal),
   })
 
-  const shared: SharedCiLoop = { registry, dashboard, refs: 1, client, notifications, locales }
+  const publish = (): void => dashboard.broadcast(registry.snapshot())
+  const shared: SharedCiLoop = {
+    registry,
+    dashboard,
+    refs: 1,
+    client,
+    notifications,
+    locales,
+    titles,
+    publish,
+  }
   dashboard.setControl({
     getSession: (id) => registry.sessionView(id as SessionId),
     setEnabled: (id, enabled) => {
@@ -75,9 +91,31 @@ export function acquireShared(config: PluginConfig, client: OpencodeClient): Sha
       return registry.sessionView(id as SessionId)
     },
   })
+  dashboard.setPanelMapper((sessions) =>
+    buildPanelSnapshot(sessions, { language: config.language, locales, titles }),
+  )
   dashboard.start()
   map.set(config.dashboard.port, shared)
   return shared
+}
+
+/**
+ * Best-effort: a title only improves the panel label, so a failed lookup must never break a
+ * watch — the panel falls back to the session id. opencode rewrites titles as the conversation
+ * evolves, so `session.updated` (not this fetch) is what keeps the cache fresh.
+ */
+async function ensureTitle(shared: SharedCiLoop, sessionID: SessionId): Promise<void> {
+  if (shared.titles.has(sessionID)) return
+  try {
+    const response = await shared.client.session.get({ path: { id: sessionID } })
+    const title = response.data?.title
+    if (title) {
+      shared.titles.set(sessionID, title)
+      shared.publish()
+    }
+  } catch (error) {
+    if (!(error instanceof Error)) throw error
+  }
 }
 
 export function releaseShared(port: number): void {
@@ -105,6 +143,7 @@ export const CiLoopPlugin: Plugin = async ({ client, directory }, options) => {
 
       const sessionID = input.sessionID as SessionId
       if (!registry.isEnabled(sessionID, directory)) return
+      void ensureTitle(shared, sessionID)
 
       const targets = await resolvePushTargets(output.output, args.data.command, input.args, {
         exec: bunExec,
@@ -119,9 +158,20 @@ export const CiLoopPlugin: Plugin = async ({ client, directory }, options) => {
     },
 
     event: async ({ event }) => {
+      if (event.type === "session.updated") {
+        // Fires on nearly every turn; re-broadcasting unchanged titles would be pure waste.
+        const { id, title } = event.properties.info
+        const sessionID = id as SessionId
+        if (shared.titles.get(sessionID) !== title) {
+          shared.titles.set(sessionID, title)
+          shared.publish()
+        }
+        return
+      }
       if (event.type === "session.deleted") {
         const sessionID = event.properties.info.id as SessionId
         registry.remove(sessionID)
+        shared.titles.delete(sessionID)
         clearSessionNotifications(shared.notifications, sessionID, shared.locales)
       }
     },
