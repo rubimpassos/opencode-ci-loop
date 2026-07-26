@@ -15,7 +15,7 @@ export const REVIEW_SNAPSHOT_QUERY = `query($owner:String!,$name:String!,$number
     pullRequest(number:$number){
       state merged reviewDecision mergeStateStatus
       reviewThreads(first:100){nodes{id isResolved isOutdated
-        comments(first:50){nodes{databaseId author{login} body path line url createdAt updatedAt}}}}
+        comments(first:50){nodes{databaseId state author{login} body path line url createdAt updatedAt}}}}
       reviews(last:30){nodes{databaseId author{login} state body submittedAt url}}
       comments(last:50){nodes{databaseId author{login} body url createdAt updatedAt}}
     }
@@ -32,8 +32,21 @@ const NodesSchema = z
   .catch({ nodes: [] })
   .transform((connection) => connection.nodes)
 
+/**
+ * `PullRequestReviewCommentState`, absent on top-level `IssueComment`s — which are never pending.
+ *
+ * `gh api graphql` authenticates AS THE USER, so a review the user is still drafting on their own PR
+ * is visible to this token while invisible to everyone else. Every PENDING comment and review is
+ * dropped here, at the parse boundary, so `ReviewSnapshot` never carries unsubmitted data and the
+ * agent never "fixes" feedback that was never sent (and may yet be deleted). Threads the filter
+ * empties are dropped too: a draft-only thread would otherwise inflate `unresolvedThreadCount` into
+ * a blocker nobody else can see.
+ */
+const COMMENT_STATES = ["PENDING", "SUBMITTED"] as const
+
 const CommentNodeSchema = z.object({
   databaseId: z.number().nullable().catch(null),
+  state: z.enum(COMMENT_STATES).nullable().catch(null),
   author: AuthorSchema,
   body: z.string().catch(""),
   path: z.string().nullable().catch(null),
@@ -77,7 +90,7 @@ const ReviewResponseSchema = z.object({
 
 function parseComment(node: unknown): ReviewComment | null {
   const parsed = CommentNodeSchema.safeParse(node)
-  if (!parsed.success || parsed.data.databaseId === null) return null
+  if (!parsed.success || parsed.data.databaseId === null || parsed.data.state === "PENDING") return null
   return {
     databaseId: parsed.data.databaseId,
     author: parsed.data.author?.login ?? "unknown",
@@ -93,17 +106,19 @@ function parseComment(node: unknown): ReviewComment | null {
 function parseThread(node: unknown): ReviewThread | null {
   const parsed = ThreadNodeSchema.safeParse(node)
   if (!parsed.success) return null
+  const comments = parseAll(parsed.data.comments, parseComment)
+  if (comments.length === 0) return null
   return {
     id: parsed.data.id,
     isResolved: parsed.data.isResolved,
     isOutdated: parsed.data.isOutdated,
-    comments: parseAll(parsed.data.comments, parseComment),
+    comments,
   }
 }
 
 function parseReview(node: unknown): ReviewInfo | null {
   const parsed = ReviewNodeSchema.safeParse(node)
-  if (!parsed.success || parsed.data.databaseId === null) return null
+  if (!parsed.success || parsed.data.databaseId === null || parsed.data.state === "PENDING") return null
   return {
     databaseId: parsed.data.databaseId,
     author: parsed.data.author?.login ?? "unknown",

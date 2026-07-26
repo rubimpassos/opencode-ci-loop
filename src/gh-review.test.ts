@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import { parseReviewSnapshot, REVIEW_SNAPSHOT_QUERY } from "./gh-review.ts"
+import { unresolvedThreadCount } from "./render-review.ts"
 
 function responseWith(pullRequest: Record<string, unknown>): string {
   return JSON.stringify({ data: { repository: { pullRequest } } })
@@ -106,12 +107,196 @@ const FULL_RESPONSE = responseWith({
   },
 })
 
+const THREAD_COMMENTS_PROJECTION = REVIEW_SNAPSHOT_QUERY.slice(
+  REVIEW_SNAPSHOT_QUERY.indexOf("comments(first:50)"),
+  REVIEW_SNAPSHOT_QUERY.indexOf("reviews(last:30)"),
+)
+
+/** The top-level `comments(last:50)` projection (`IssueComment`, which has no `state` field). */
+const TOP_LEVEL_COMMENTS_PROJECTION = REVIEW_SNAPSHOT_QUERY.slice(
+  REVIEW_SNAPSHOT_QUERY.indexOf("comments(last:50)"),
+)
+
+function threadCommentNode(databaseId: number, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    databaseId,
+    author: { login: "rubimpassos" },
+    body: `body ${databaseId}`,
+    path: "src/gh.ts",
+    line: databaseId,
+    url: `https://github.com/o/r/pull/12#discussion_r${databaseId}`,
+    createdAt: "2026-07-20T10:00:00Z",
+    updatedAt: "2026-07-20T10:00:00Z",
+    ...extra,
+  }
+}
+
+function threadNode(id: string, commentNodes: readonly Record<string, unknown>[]): Record<string, unknown> {
+  return { id, isResolved: false, isOutdated: false, comments: { nodes: commentNodes } }
+}
+
 describe("REVIEW_SNAPSHOT_QUERY", () => {
   it("requests the three review collections with locked page sizes", () => {
     expect(REVIEW_SNAPSHOT_QUERY).toContain("reviewThreads(first:100)")
     expect(REVIEW_SNAPSHOT_QUERY).toContain("reviews(last:30)")
     expect(REVIEW_SNAPSHOT_QUERY).toContain("comments(last:50)")
     expect(REVIEW_SNAPSHOT_QUERY).toContain("mergeStateStatus")
+  })
+
+  it("requests `state` on thread comments so pending drafts can be told apart", () => {
+    expect(THREAD_COMMENTS_PROJECTION).toContain("state")
+  })
+
+  it("never requests `state` on top-level comments (IssueComment has no such field)", () => {
+    expect(TOP_LEVEL_COMMENTS_PROJECTION).not.toContain("state")
+  })
+})
+
+/**
+ * `gh api graphql` authenticates AS THE USER, so an unsubmitted review the user is still drafting
+ * on their own PR is fully visible to this token while invisible to everyone else. Without these
+ * filters the agent would start "fixing" feedback that was never submitted (and may yet be deleted).
+ */
+describe("parseReviewSnapshot — unsubmitted (PENDING) review data", () => {
+  it("drops a pending review and keeps submitted ones", () => {
+    const json = responseWith({
+      ...BASE_PR,
+      reviews: {
+        nodes: [
+          {
+            databaseId: 3001,
+            author: { login: "rubimpassos" },
+            state: "PENDING",
+            body: "draft: still thinking about this one",
+            submittedAt: "",
+            url: "https://github.com/o/r/pull/12#pullrequestreview-3001",
+          },
+          {
+            databaseId: 3002,
+            author: { login: "octocat" },
+            state: "CHANGES_REQUESTED",
+            body: "submitted: please fix",
+            submittedAt: "2026-07-20T11:00:00Z",
+            url: "https://github.com/o/r/pull/12#pullrequestreview-3002",
+          },
+        ],
+      },
+    })
+
+    const snapshot = parseReviewSnapshot(json, 12, 0)
+
+    expect(snapshot.reviews.map((review) => review.databaseId)).toEqual([3002])
+    expect(snapshot.reviews.map((review) => review.body)).toEqual(["submitted: please fix"])
+  })
+
+  it("drops a pending comment while its submitted siblings survive in the same thread", () => {
+    const json = responseWith({
+      ...BASE_PR,
+      reviewThreads: {
+        nodes: [
+          threadNode("RT_mixed", [
+            threadCommentNode(2001, { state: "SUBMITTED" }),
+            threadCommentNode(2002, { state: "PENDING", body: "draft reply nobody has sent" }),
+            threadCommentNode(2003, { state: "SUBMITTED" }),
+          ]),
+        ],
+      },
+    })
+
+    const snapshot = parseReviewSnapshot(json, 12, 0)
+
+    expect(snapshot.threads[0]?.comments.map((comment) => comment.databaseId)).toEqual([2001, 2003])
+  })
+
+  it("keeps a thread that mixes submitted and pending comments", () => {
+    const json = responseWith({
+      ...BASE_PR,
+      reviewThreads: {
+        nodes: [
+          threadNode("RT_mixed", [
+            threadCommentNode(2001, { state: "SUBMITTED" }),
+            threadCommentNode(2002, { state: "PENDING" }),
+          ]),
+        ],
+      },
+    })
+
+    const snapshot = parseReviewSnapshot(json, 12, 0)
+
+    expect(snapshot.threads.map((thread) => thread.id)).toEqual(["RT_mixed"])
+  })
+
+  it("drops a thread whose only comment is pending (a brand-new draft thread)", () => {
+    const json = responseWith({
+      ...BASE_PR,
+      reviewThreads: {
+        nodes: [
+          threadNode("RT_draft_only", [threadCommentNode(2001, { state: "PENDING" })]),
+          threadNode("RT_submitted", [threadCommentNode(2002, { state: "SUBMITTED" })]),
+        ],
+      },
+    })
+
+    const snapshot = parseReviewSnapshot(json, 12, 0)
+
+    expect(snapshot.threads.map((thread) => thread.id)).toEqual(["RT_submitted"])
+  })
+
+  it("keeps top-level PR comments, whose nodes carry no `state` field at all", () => {
+    const json = responseWith({
+      ...BASE_PR,
+      comments: {
+        nodes: [
+          {
+            databaseId: 4001,
+            author: { login: "octocat" },
+            body: "General PR conversation comment",
+            url: "https://github.com/o/r/pull/12#issuecomment-4001",
+            createdAt: "2026-07-20T12:00:00Z",
+            updatedAt: "2026-07-20T12:00:00Z",
+          },
+        ],
+      },
+    })
+
+    const snapshot = parseReviewSnapshot(json, 12, 0)
+
+    expect(snapshot.comments.map((comment) => comment.databaseId)).toEqual([4001])
+  })
+
+  it("keeps a comment whose state is unknown garbage instead of throwing or dropping it", () => {
+    const json = responseWith({
+      ...BASE_PR,
+      reviewThreads: {
+        nodes: [threadNode("RT_garbage", [threadCommentNode(2001, { state: "SOMETHING_NEW" })])],
+      },
+    })
+
+    const snapshot = parseReviewSnapshot(json, 12, 0)
+
+    expect(snapshot.threads[0]?.comments.map((comment) => comment.databaseId)).toEqual([2001])
+  })
+
+  it("keeps a pending-only thread out of unresolvedThreadCount, so no phantom blocker is produced", () => {
+    const pendingOnly = parseReviewSnapshot(
+      responseWith({
+        ...BASE_PR,
+        reviewThreads: { nodes: [threadNode("RT_draft", [threadCommentNode(2001, { state: "PENDING" })])] },
+      }),
+      12,
+      0,
+    )
+    const submitted = parseReviewSnapshot(
+      responseWith({
+        ...BASE_PR,
+        reviewThreads: { nodes: [threadNode("RT_draft", [threadCommentNode(2001, { state: "SUBMITTED" })])] },
+      }),
+      12,
+      0,
+    )
+
+    expect(unresolvedThreadCount(pendingOnly)).toBe(0)
+    expect(unresolvedThreadCount(submitted)).toBe(1)
   })
 })
 
