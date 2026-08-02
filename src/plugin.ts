@@ -8,7 +8,16 @@ import { renderWatchNotice } from "./render.ts"
 import { resolvePushTargets } from "./resolve.ts"
 import { DashboardServer } from "./server.ts"
 import type { OpencodeClient } from "./session-context.ts"
-import { assertNever, type PluginConfig, PluginConfigSchema, type SessionId } from "./types.ts"
+import {
+  assertNever,
+  type LogLevel,
+  type LogSink,
+  type PluginConfig,
+  PluginConfigSchema,
+  type SessionId,
+} from "./types.ts"
+
+const LOG_SERVICE = "ci-loop"
 
 const BashArgsSchema = tool.schema.object({ command: tool.schema.string() }).loose()
 
@@ -59,7 +68,8 @@ export function acquireShared(config: PluginConfig, client: OpencodeClient): Sha
     return existing
   }
 
-  const dashboard = new DashboardServer(config.dashboard)
+  const log: LogSink = (level, message) => void logToOpencode(shared, level, message)
+  const dashboard = new DashboardServer(config.dashboard, log)
   const notifications = new Set<string>()
   const locales = new Map<SessionId, Locale>()
   const titles = new Map<SessionId, string>()
@@ -97,6 +107,19 @@ export function acquireShared(config: PluginConfig, client: OpencodeClient): Sha
   dashboard.start()
   map.set(config.dashboard.port, shared)
   return shared
+}
+
+/**
+ * Writes to opencode's log file. Never `console.*`: plugins run in a worker thread that shares the
+ * TUI's terminal, so those writes paint over the rendered frame. Best-effort — a dropped
+ * diagnostic must never break a watch.
+ */
+async function logToOpencode(shared: SharedCiLoop, level: LogLevel, message: string): Promise<void> {
+  try {
+    await shared.client.app.log({ body: { service: LOG_SERVICE, level, message } })
+  } catch (error) {
+    if (!(error instanceof Error)) throw error
+  }
 }
 
 /**

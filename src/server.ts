@@ -3,7 +3,7 @@ import { DASHBOARD_HTML } from "./dashboard.ts"
 import { CATALOGS } from "./i18n.ts"
 import type { PanelSnapshot } from "./panel-types.ts"
 import { buildChrome } from "./panel-view.ts"
-import type { PluginConfig, SessionState } from "./types.ts"
+import type { LogSink, PluginConfig, SessionState } from "./types.ts"
 
 type SseClient = {
   readonly controller: ReadableStreamDefaultController<Uint8Array>
@@ -27,11 +27,26 @@ const EnabledBodySchema = z.object({ enabled: z.boolean() })
 
 const SESSION_PATH = /^\/sessions\/([^/]+?)(\/enabled)?$/
 
-const BIND_RETRY_MS = 15_000
-
 const DASHBOARD_MARKER_HEADER = "x-ci-loop"
 const DASHBOARD_MARKER_VALUE = "dashboard"
-const PROBE_TIMEOUT_MS = 1_000
+const MARKER_HEADERS = { [DASHBOARD_MARKER_HEADER]: DASHBOARD_MARKER_VALUE } as const
+
+export type BindTuning = {
+  readonly retryMs: number
+  /**
+   * Consecutive probes that must all miss the marker before the owner counts as foreign. A single
+   * probe is not evidence: opencode's boot saturates the event loop and a busy sibling can take
+   * over a second just to answer, so one timeout would slander a healthy sibling dashboard.
+   */
+  readonly foreignProbesBeforeLog: number
+  readonly probeTimeoutMs: number
+}
+
+export const DEFAULT_BIND_TUNING: BindTuning = {
+  retryMs: 15_000,
+  foreignProbesBeforeLog: 3,
+  probeTimeoutMs: 2_000,
+}
 
 /** Mini servidor HTTP+SSE do dashboard. Broadcast de snapshots pros clientes conectados. */
 export class DashboardServer {
@@ -44,9 +59,14 @@ export class DashboardServer {
   private panelMapper: PanelMapper | null = null
   private retryTimer: ReturnType<typeof setTimeout> | null = null
   private stopped = false
-  private warnedBindFailure = false
+  private foreignProbes = 0
+  private loggedBindFailure = false
 
-  constructor(private readonly config: PluginConfig["dashboard"]) {}
+  constructor(
+    private readonly config: PluginConfig["dashboard"],
+    private readonly log: LogSink,
+    private readonly tuning: BindTuning = DEFAULT_BIND_TUNING,
+  ) {}
 
   get url(): string {
     return `http://${this.config.host}:${this.config.port}`
@@ -70,28 +90,38 @@ export class DashboardServer {
         port: this.config.port,
         fetch: (request) => this.route(request),
       })
+      this.foreignProbes = 0
     } catch (error) {
       if (!(error instanceof Error)) throw error
-      void this.warnIfForeignOwner()
+      void this.logIfForeignOwner()
       this.scheduleRetry()
     }
   }
 
-  /** Sibling opencode dashboard on the port → silent takeover retry. Foreign process → warn once. */
-  private async warnIfForeignOwner(): Promise<void> {
-    if (this.warnedBindFailure) return
-    if (await this.portOwnerIsSiblingDashboard()) return
-    if (this.warnedBindFailure) return
-    this.warnedBindFailure = true
-    console.warn(
-      `[ci-loop] port ${this.config.port} in use by another process; retrying to take it over every ${BIND_RETRY_MS}ms`,
+  /** Sibling opencode dashboard on the port → silent takeover retry. Foreign process → log once. */
+  private async logIfForeignOwner(): Promise<void> {
+    if (this.loggedBindFailure) return
+    if (await this.portOwnerIsSiblingDashboard()) {
+      this.foreignProbes = 0
+      return
+    }
+    this.foreignProbes += 1
+    if (this.foreignProbes < this.tuning.foreignProbesBeforeLog) return
+    if (this.loggedBindFailure) return
+    this.loggedBindFailure = true
+    this.log(
+      "warn",
+      `port ${this.config.port} in use by another process; retrying to take it over every ${this.tuning.retryMs}ms`,
     )
   }
 
   private async portOwnerIsSiblingDashboard(): Promise<boolean> {
     try {
+      // HEAD: the marker lives in the headers, and a busy owner can blow the probe budget just
+      // serializing its (hundreds of KB) `/state` body.
       const response = await fetch(`${this.url}/state`, {
-        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+        method: "HEAD",
+        signal: AbortSignal.timeout(this.tuning.probeTimeoutMs),
       })
       return response.headers.get(DASHBOARD_MARKER_HEADER) === DASHBOARD_MARKER_VALUE
     } catch (error) {
@@ -105,7 +135,7 @@ export class DashboardServer {
     const timer = setTimeout(() => {
       this.retryTimer = null
       this.start()
-    }, BIND_RETRY_MS)
+    }, this.tuning.retryMs)
     timer.unref?.()
     this.retryTimer = timer
   }
@@ -124,9 +154,9 @@ export class DashboardServer {
       case "/":
         return new Response(DASHBOARD_HTML, { headers: { "content-type": "text/html; charset=utf-8" } })
       case "/state":
-        return Response.json(this.lastSnapshot, {
-          headers: { [DASHBOARD_MARKER_HEADER]: DASHBOARD_MARKER_VALUE },
-        })
+        return request.method === "HEAD"
+          ? new Response(null, { headers: MARKER_HEADERS })
+          : Response.json(this.lastSnapshot, { headers: MARKER_HEADERS })
       case "/events":
         return this.streamTo(this.clients, this.lastSnapshot)
       case "/panel/state":

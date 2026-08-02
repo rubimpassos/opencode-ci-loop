@@ -238,6 +238,16 @@ export type SessionState = {
   readonly directory: string | null
 }
 
+export const LOG_LEVELS = ["debug", "info", "warn", "error"] as const
+export type LogLevel = (typeof LOG_LEVELS)[number]
+
+/**
+ * Diagnostics sink. opencode runs plugins in a worker thread that shares the TUI's terminal, so a
+ * `console.*` write lands on top of the rendered frame and corrupts it — every diagnostic goes
+ * through opencode's own log instead (`client.app.log`, i.e. `~/.local/share/opencode/log`).
+ */
+export type LogSink = (level: LogLevel, message: string) => void
+
 export const PluginConfigSchema = z.object({
   autoWatch: z.boolean().default(true),
   pollIntervalMs: z.number().int().min(1000).default(15_000),

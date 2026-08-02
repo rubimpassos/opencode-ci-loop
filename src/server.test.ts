@@ -4,8 +4,16 @@ import { DASHBOARD_HTML } from "./dashboard.ts"
 import { DASHBOARD_SCRIPT } from "./dashboard-script.ts"
 import { DASHBOARD_STYLES } from "./dashboard-styles.ts"
 import { PANEL_PHASE_KEYS, type PanelChrome, type PanelSession, type PanelSnapshot } from "./panel-types.ts"
-import { DashboardServer, isAllowedHost, type PanelMapper, type SessionControl } from "./server.ts"
-import type { CommitSha, SessionId, SessionState, Watch } from "./types.ts"
+import {
+  type BindTuning,
+  DashboardServer,
+  isAllowedHost,
+  type PanelMapper,
+  type SessionControl,
+} from "./server.ts"
+import type { CommitSha, LogLevel, LogSink, SessionId, SessionState, Watch } from "./types.ts"
+
+const noopLog: LogSink = () => {}
 
 describe("isAllowedHost", () => {
   it.each([
@@ -79,7 +87,7 @@ describe("DashboardServer control routes", () => {
   })
 
   function startServer(control?: SessionControl): string {
-    server = new DashboardServer({ enabled: true, host: "127.0.0.1", port: TEST_PORT })
+    server = new DashboardServer({ enabled: true, host: "127.0.0.1", port: TEST_PORT }, noopLog)
     if (control) server.setControl(control)
     server.start()
     return `http://127.0.0.1:${TEST_PORT}`
@@ -164,6 +172,26 @@ describe("DashboardServer control routes", () => {
 
     expect(response.status).toBe(200)
     expect(response.headers.get("x-ci-loop")).toBe("dashboard")
+  })
+
+  it("HEAD /state answers the marker without serializing the snapshot", async () => {
+    const base = startServer()
+    server?.broadcast([
+      {
+        sessionID: "ses_probe" as SessionId,
+        enabled: true,
+        watches: [waitingWatch("f")],
+        watch: null,
+        directory: null,
+      },
+    ])
+
+    const response = await fetch(`${base}/state`, { method: "HEAD" })
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get("x-ci-loop")).toBe("dashboard")
+    expect(response.headers.get("content-length")).toBe("0")
+    expect(await response.text()).toBe("")
   })
 
   it("GET /state carries every watch plus the deprecated latest-watch alias", async () => {
@@ -288,7 +316,7 @@ describe("DashboardServer panel routes", () => {
   })
 
   function startServer(mapper?: PanelMapper): string {
-    server = new DashboardServer({ enabled: true, host: "127.0.0.1", port: PANEL_PORT })
+    server = new DashboardServer({ enabled: true, host: "127.0.0.1", port: PANEL_PORT }, noopLog)
     if (mapper) server.setPanelMapper(mapper)
     server.start()
     return `http://127.0.0.1:${PANEL_PORT}`
@@ -415,47 +443,96 @@ describe("DashboardServer panel routes", () => {
 describe("DashboardServer bind conflict", () => {
   const servers: DashboardServer[] = []
   let foreign: ReturnType<typeof Bun.serve> | null = null
-  let warnSpy: ReturnType<typeof makeWarnSpy> | null = null
+  let consoleSpies: ReturnType<typeof spyOn>[] = []
 
-  function makeWarnSpy() {
-    return spyOn(console, "warn").mockImplementation(() => {})
+  const FAST_TUNING: BindTuning = { retryMs: 20, foreignProbesBeforeLog: 3, probeTimeoutMs: 500 }
+
+  function silenceConsole(): void {
+    consoleSpies = (["warn", "error", "log", "info", "debug"] as const).map((method) =>
+      spyOn(console, method).mockImplementation(() => {}),
+    )
   }
 
-  function dashboardOn(port: number): DashboardServer {
-    const server = new DashboardServer({ enabled: true, host: "127.0.0.1", port })
+  function dashboardOn(port: number, tuning: BindTuning = FAST_TUNING): Array<[LogLevel, string]> {
+    const logs: Array<[LogLevel, string]> = []
+    const server = new DashboardServer(
+      { enabled: true, host: "127.0.0.1", port },
+      (level, message) => logs.push([level, message]),
+      tuning,
+    )
     servers.push(server)
     server.start()
-    return server
+    return logs
   }
 
   afterEach(() => {
     for (const server of servers.splice(0)) server.stop()
     foreign?.stop(true)
     foreign = null
-    warnSpy?.mockRestore()
-    warnSpy = null
+    for (const spy of consoleSpies.splice(0)) spy.mockRestore()
   })
 
   it("stays silent when a sibling dashboard owns the port", async () => {
-    warnSpy = makeWarnSpy()
     const port = TEST_PORT + 1
     dashboardOn(port)
-    dashboardOn(port)
+    const logs = dashboardOn(port)
 
-    await Bun.sleep(200)
+    await Bun.sleep(400)
 
-    expect(warnSpy).not.toHaveBeenCalled()
+    expect(logs).toEqual([])
   })
 
-  it("warns once when a foreign process owns the port", async () => {
-    warnSpy = makeWarnSpy()
+  it("logs once when a foreign process owns the port", async () => {
     const port = TEST_PORT + 2
     foreign = Bun.serve({ hostname: "127.0.0.1", port, fetch: () => new Response("ok") })
-    dashboardOn(port)
+    const logs = dashboardOn(port)
 
-    await Bun.sleep(200)
+    await Bun.sleep(400)
 
-    expect(warnSpy).toHaveBeenCalledTimes(1)
-    expect(String(warnSpy.mock.calls[0]?.[0])).toContain(`port ${port} in use by another process`)
+    expect(logs).toHaveLength(1)
+    expect(logs[0]?.[0]).toBe("warn")
+    expect(logs[0]?.[1]).toContain(`port ${port} in use by another process`)
+  })
+
+  it("never touches console, which would corrupt the TUI frame", async () => {
+    silenceConsole()
+    const port = TEST_PORT + 4
+    foreign = Bun.serve({ hostname: "127.0.0.1", port, fetch: () => new Response("ok") })
+    const logs = dashboardOn(port)
+
+    await Bun.sleep(400)
+
+    expect(logs).toHaveLength(1)
+    for (const spy of consoleSpies) expect(spy).not.toHaveBeenCalled()
+  })
+
+  it("holds the warning on the first probe, when opencode's boot starves it", async () => {
+    const port = TEST_PORT + 5
+    foreign = Bun.serve({ hostname: "127.0.0.1", port, fetch: () => new Response("ok") })
+    const logs = dashboardOn(port, { ...FAST_TUNING, retryMs: 60_000 })
+
+    await Bun.sleep(400)
+
+    expect(logs).toEqual([])
+  })
+
+  it("never slanders a sibling that only sometimes answers in time", async () => {
+    const port = TEST_PORT + 6
+    let probes = 0
+    foreign = Bun.serve({
+      hostname: "127.0.0.1",
+      port,
+      fetch: () => {
+        probes += 1
+        const answersMarker = probes % 3 === 0
+        return new Response(null, { headers: answersMarker ? { "x-ci-loop": "dashboard" } : {} })
+      },
+    })
+    const logs = dashboardOn(port)
+
+    await Bun.sleep(500)
+
+    expect(probes).toBeGreaterThan(3)
+    expect(logs).toEqual([])
   })
 })
