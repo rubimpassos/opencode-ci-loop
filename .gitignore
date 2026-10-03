@@ -36,3 +36,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # oh-my-openagent (estado local de planos/execução)
 .omo/
+
+# OpenChamber browser captures
+.openchamber/
