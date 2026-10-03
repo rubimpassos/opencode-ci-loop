@@ -32,19 +32,21 @@ export type PanelDeps = {
   readonly language: string
   readonly locales: ReadonlyMap<SessionId, Locale>
   readonly titles: ReadonlyMap<SessionId, string>
+  /** Viewer override: when set, chrome AND every session row render in it, ignoring session locales. */
+  readonly locale?: Locale
 }
 
 /** Projects the frozen watch state into the localized, fully-resolved view model the panel renders. */
 export function buildPanelSnapshot(sessions: readonly SessionState[], deps: PanelDeps): PanelSnapshot {
   return {
-    chrome: buildChrome(CATALOGS[panelLocale(deps.language, sessions, deps.locales)]),
+    chrome: buildChrome(CATALOGS[deps.locale ?? panelLocale(deps.language, sessions, deps.locales)]),
     sessions: sessions.map((session) => buildSession(session, deps)),
   }
 }
 
 /** Per-session strings follow that session's locale — a multi-project panel renders several at once. */
 function buildSession(session: SessionState, deps: PanelDeps): PanelSession {
-  const locale = resolveLocale(deps.language, deps.locales.get(session.sessionID))
+  const locale = deps.locale ?? resolveLocale(deps.language, deps.locales.get(session.sessionID))
   const title = deps.titles.get(session.sessionID) ?? null
   const identity: readonly (string | null)[] = [title, session.sessionID, session.directory]
   return {
@@ -68,6 +70,7 @@ function buildWatch(watch: Watch, locale: Locale, identity: readonly (string | n
     phaseKey: phase.key,
     tone: toneOf(phase.key),
     phaseLabel: phase.label,
+    failed: failedOf(watch.phase),
     runs: content.runs.map(runRow),
     checks: checksOf(content.report),
     failures: content.report?.failedLogs.map(failureRow) ?? [],
@@ -127,6 +130,24 @@ function phaseOf(
       return { key: "timed-out", label: messages.panelPhaseTimedOut }
     case "error":
       return { key: "error", label: messages.panelPhaseError(phase.message) }
+    default:
+      return assertNever(phase)
+  }
+}
+
+/** Same classification as done-green/done-failed: CI state only, never PR-only blockers. */
+function failedOf(phase: WatchPhase): boolean {
+  switch (phase.kind) {
+    case "error":
+      return true
+    case "done":
+    case "reviewing":
+    case "review-ended":
+      return !isReportClean(phase.report)
+    case "waiting":
+    case "running":
+    case "timed-out":
+      return false
     default:
       return assertNever(phase)
   }

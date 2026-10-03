@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test"
 import type { Plugin } from "@opencode-ai/plugin"
 import { createV1Host } from "./host-v1.ts"
+import { CATALOGS } from "./i18n.ts"
 import type { PanelSnapshot } from "./panel-types.ts"
 import { CiLoopPlugin } from "./plugin.ts"
 import { acquireShared, isGitPush, releaseShared } from "./plugin-runtime.ts"
@@ -113,8 +114,8 @@ async function setWatch(hooks: Hooks, sessionID: string, action: "enable" | "dis
   await hooks.tool?.["ci_watch"]?.execute({ action }, context)
 }
 
-async function panelState(config: PluginConfig): Promise<PanelSnapshot> {
-  const response = await fetch(`http://127.0.0.1:${config.dashboard.port}/panel/state`)
+async function panelState(config: PluginConfig, query = ""): Promise<PanelSnapshot> {
+  const response = await fetch(`http://127.0.0.1:${config.dashboard.port}/panel/state${query}`)
   return (await response.json()) as PanelSnapshot
 }
 
@@ -153,6 +154,28 @@ describe("CiLoopPlugin shared state", () => {
     } finally {
       await a.dispose?.()
       await b.dispose?.()
+    }
+  })
+})
+
+describe("CiLoopPlugin panel locale", () => {
+  it("renders /panel/state in the locale a viewer asks for", async () => {
+    // Given a running plugin with a watched session
+    const config = testConfig(true)
+    const hooks = await makeInstance({ directory: DIR, config, client: recordingClient().client })
+
+    try {
+      await firePush(hooks, SID)
+
+      // When two viewers ask for different locales
+      const pt = await panelState(config, "?locale=pt-BR")
+      const en = await panelState(config, "?locale=en")
+
+      // Then each gets its own catalog
+      expect(pt.chrome.searchPlaceholder).toBe(CATALOGS["pt-BR"].panelSearchPlaceholder)
+      expect(en.chrome.searchPlaceholder).toBe(CATALOGS.en.panelSearchPlaceholder)
+    } finally {
+      await hooks.dispose?.()
     }
   })
 })

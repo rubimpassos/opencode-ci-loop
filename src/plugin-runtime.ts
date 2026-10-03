@@ -101,9 +101,10 @@ function createShared(config: PluginConfig, registration: HostRegistration): Sha
       return registry.sessionView(sessionID)
     },
   })
-  dashboard.setPanelMapper((sessions) =>
-    buildPanelSnapshot(sessions, { language: config.language, locales, titles }),
-  )
+  dashboard.setPanelMapper((sessions, locale) => {
+    const deps = { language: config.language, locales, titles }
+    return buildPanelSnapshot(sessions, locale === undefined ? deps : { ...deps, locale })
+  })
   dashboard.start()
   return shared
 }

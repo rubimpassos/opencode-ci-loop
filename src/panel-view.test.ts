@@ -611,3 +611,82 @@ describe("buildPanelSnapshot — phaseKey", () => {
     expect(oneWatch({ kind: "error", message: "x" }).watch.checks).toEqual([])
   })
 })
+
+describe("buildPanelSnapshot — failed", () => {
+  const clean = makeReport()
+  const ciFailed = makeReport({ runs: [makeRun({ conclusion: "failure" })] })
+  const prBlockedOnly = makeReport({ pr: makePr({ mergeStateStatus: "BLOCKED", reviewDecision: null }) })
+  const reviewing = (report: CiReport): WatchPhase => ({
+    kind: "reviewing",
+    report,
+    snapshot: makeSnapshot({ threads: threads(2), mergeStateStatus: "BLOCKED" }),
+    delta: EMPTY_DELTA,
+  })
+  const ended = (report: CiReport): WatchPhase => ({
+    kind: "review-ended",
+    report,
+    snapshot: makeSnapshot(),
+    delta: EMPTY_DELTA,
+    reason: "merged",
+  })
+  const cases: readonly (readonly [string, WatchPhase, boolean])[] = [
+    ["waiting", { kind: "waiting" }, false],
+    ["running", { kind: "running", runs: [makeRun({ status: "in_progress", conclusion: null })] }, false],
+    ["timed-out", { kind: "timed-out", runs: [makeRun({ status: "in_progress", conclusion: null })] }, false],
+    ["error", { kind: "error", message: "gh exploded" }, true],
+    ["done clean", { kind: "done", report: clean }, false],
+    ["done CI failed", { kind: "done", report: ciFailed }, true],
+    ["done PR-only blocker", { kind: "done", report: prBlockedOnly }, false],
+    ["reviewing clean CI with unresolved threads", reviewing(clean), false],
+    ["reviewing failed CI", reviewing(ciFailed), true],
+    ["review-ended clean", ended(clean), false],
+    ["review-ended failed CI", ended(ciFailed), true],
+  ]
+
+  it.each(cases)("%s → failed=%p", (_label, phase, failed) => {
+    expect(oneWatch(phase).watch.failed).toBe(failed)
+  })
+
+  it("keeps the stored failure visible on a paused session", () => {
+    const session = makeSession({
+      enabled: false,
+      watches: [makeWatch({ phase: { kind: "done", report: ciFailed } })],
+    })
+    expect(buildPanelSnapshot([session], makeDeps()).sessions[0]?.watches[0]?.failed).toBe(true)
+  })
+})
+
+describe("buildPanelSnapshot — viewer locale override", () => {
+  const blocked = makeReport({ pr: makePr({ mergeStateStatus: "BLOCKED" }) })
+  const sessions = [
+    makeSession({
+      sessionID: "ses_en" as SessionId,
+      watches: [makeWatch({ startedAt: 2, phase: { kind: "done", report: blocked } })],
+    }),
+    makeSession({
+      sessionID: "ses_pt" as SessionId,
+      watches: [makeWatch({ startedAt: 1, phase: { kind: "done", report: blocked } })],
+    }),
+  ]
+  const locales = new Map<SessionId, Locale>([
+    ["ses_en" as SessionId, "en"],
+    ["ses_pt" as SessionId, "pt-BR"],
+  ])
+
+  it.each(["en", "pt-BR"] as const)("renders chrome and every session row in %s", (locale) => {
+    const snapshot = buildPanelSnapshot(sessions, makeDeps({ language: "auto", locales, locale }))
+    expect(snapshot.chrome.noMatches).toBe(CATALOGS[locale].panelNoMatches)
+    expect(snapshot.sessions.map((session) => session.watches[0]?.pr?.blockers)).toEqual([
+      [CATALOGS[locale].blockerBranchProtection],
+      [CATALOGS[locale].blockerBranchProtection],
+    ])
+  })
+
+  it("leaves per-session localization intact without an override", () => {
+    const snapshot = buildPanelSnapshot(sessions, makeDeps({ language: "auto", locales }))
+    expect(snapshot.sessions.map((session) => session.watches[0]?.pr?.blockers)).toEqual([
+      [EN.blockerBranchProtection],
+      [PT.blockerBranchProtection],
+    ])
+  })
+})

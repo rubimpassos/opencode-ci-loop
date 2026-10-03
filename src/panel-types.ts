@@ -54,6 +54,11 @@ export type PanelWatch = {
   readonly tone: PanelTone
   /** Localized. */
   readonly phaseLabel: string
+  /**
+   * CI failure carried by this stored watch: `error`, or a report that is not clean (done/reviewing/
+   * review-ended). PR-only blockers do not count; reviewing alone is not a failure.
+   */
+  readonly failed: boolean
   readonly runs: readonly PanelRun[]
   readonly checks: readonly PanelCheck[]
   readonly failures: readonly PanelFailure[]

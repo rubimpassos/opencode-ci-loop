@@ -1,13 +1,10 @@
 import { z } from "zod"
 import { DASHBOARD_HTML } from "./dashboard.ts"
-import { CATALOGS } from "./i18n.ts"
+import { CATALOGS, LOCALES, type Locale } from "./i18n.ts"
 import type { PanelSnapshot } from "./panel-types.ts"
 import { buildChrome } from "./panel-view.ts"
+import { DEFAULT_HEARTBEAT_MS, SseChannel } from "./sse.ts"
 import type { LogSink, PluginConfig, SessionState } from "./types.ts"
-
-type SseClient = {
-  readonly controller: ReadableStreamDefaultController<Uint8Array>
-}
 
 /** External control (OpenChamber) of the per-session toggle. `getSession` is a pure read. */
 export type SessionControl = {
@@ -15,13 +12,27 @@ export type SessionControl = {
   readonly setEnabled: (sessionID: string, enabled: boolean) => SessionState
 }
 
-/** Projects the frozen `SessionState[]` snapshot into the panel view model. Injected by the plugin. */
-export type PanelMapper = (sessions: readonly SessionState[]) => PanelSnapshot
+/**
+ * Projects the frozen `SessionState[]` snapshot into the panel view model. Injected by the plugin.
+ * `locale` is the viewer's `?locale=` override; absent = default per-session localization.
+ */
+export type PanelMapper = (sessions: readonly SessionState[], locale?: Locale) => PanelSnapshot
 
 /** Served until the plugin wires its mapper; English because no session has claimed a locale yet. */
 const EMPTY_PANEL: PanelSnapshot = { chrome: buildChrome(CATALOGS.en), sessions: [] }
 
-const emptyPanelMapper: PanelMapper = () => EMPTY_PANEL
+const emptyPanelMapper: PanelMapper = (_sessions, locale) =>
+  locale === undefined ? EMPTY_PANEL : { chrome: buildChrome(CATALOGS[locale]), sessions: [] }
+
+/** Viewer locale of a panel request: `null` = no override (default mapping). */
+type ViewerLocale = Locale | null
+
+/** `undefined` = the supplied `locale` query is not a supported locale (→ 400). */
+function parseViewerLocale(url: URL): ViewerLocale | undefined {
+  const raw = url.searchParams.get("locale")
+  if (raw === null) return null
+  return LOCALES.find((locale) => locale === raw)
+}
 
 const EnabledBodySchema = z.object({ enabled: z.boolean() })
 
@@ -48,13 +59,19 @@ export const DEFAULT_BIND_TUNING: BindTuning = {
   probeTimeoutMs: 2_000,
 }
 
+/** Bind tuning plus the SSE comment-heartbeat period (defaults to 5 s). */
+export type ServerTuning = BindTuning & { readonly heartbeatMs?: number }
+
+type BunServer = ReturnType<typeof Bun.serve>
+
 /** Mini servidor HTTP+SSE do dashboard. Broadcast de snapshots pros clientes conectados. */
 export class DashboardServer {
-  private readonly clients = new Set<SseClient>()
-  private readonly panelClients = new Set<SseClient>()
-  private server: ReturnType<typeof Bun.serve> | null = null
+  private readonly clients: SseChannel<null>
+  private readonly panelClients: SseChannel<ViewerLocale>
+  private server: BunServer | null = null
   private lastSnapshot: readonly SessionState[] = []
-  private lastPanel: PanelSnapshot = EMPTY_PANEL
+  /** Panels mapped from `lastSnapshot`, one per viewer locale; cleared on every broadcast. */
+  private readonly panels = new Map<ViewerLocale, PanelSnapshot>([[null, EMPTY_PANEL]])
   private control: SessionControl | null = null
   private panelMapper: PanelMapper | null = null
   private retryTimer: ReturnType<typeof setTimeout> | null = null
@@ -65,8 +82,12 @@ export class DashboardServer {
   constructor(
     private readonly config: PluginConfig["dashboard"],
     private readonly log: LogSink,
-    private readonly tuning: BindTuning = DEFAULT_BIND_TUNING,
-  ) {}
+    private readonly tuning: ServerTuning = DEFAULT_BIND_TUNING,
+  ) {
+    const heartbeatMs = tuning.heartbeatMs ?? DEFAULT_HEARTBEAT_MS
+    this.clients = new SseChannel(heartbeatMs)
+    this.panelClients = new SseChannel(heartbeatMs)
+  }
 
   get url(): string {
     return `http://${this.config.host}:${this.config.port}`
@@ -88,7 +109,7 @@ export class DashboardServer {
       this.server = Bun.serve({
         hostname: this.config.host,
         port: this.config.port,
-        fetch: (request) => this.route(request),
+        fetch: (request, server) => this.route(request, server),
       })
       this.foreignProbes = 0
     } catch (error) {
@@ -140,11 +161,12 @@ export class DashboardServer {
     this.retryTimer = timer
   }
 
-  private async route(request: Request): Promise<Response> {
+  private async route(request: Request, server: BunServer): Promise<Response> {
     if (!isAllowedHost(request.headers.get("host"), this.config.port)) {
       return new Response("forbidden", { status: 403 })
     }
-    const path = new URL(request.url).pathname
+    const url = new URL(request.url)
+    const path = url.pathname
     const sessionMatch = path.match(SESSION_PATH)
     const sessionID = sessionMatch?.[1]
     if (sessionID !== undefined) {
@@ -158,11 +180,16 @@ export class DashboardServer {
           ? new Response(null, { headers: MARKER_HEADERS })
           : Response.json(this.lastSnapshot, { headers: MARKER_HEADERS })
       case "/events":
-        return this.streamTo(this.clients, this.lastSnapshot)
+        server.timeout(request, 0)
+        return this.clients.open(null, this.lastSnapshot)
       case "/panel/state":
-        return Response.json(this.lastPanel)
-      case "/panel/events":
-        return this.streamTo(this.panelClients, this.lastPanel)
+      case "/panel/events": {
+        const locale = parseViewerLocale(url)
+        if (locale === undefined) return new Response("invalid locale", { status: 400 })
+        if (path === "/panel/state") return Response.json(this.panelFor(locale))
+        server.timeout(request, 0)
+        return this.panelClients.open(locale, this.panelFor(locale))
+      }
       default:
         return new Response("not found", { status: 404 })
     }
@@ -183,9 +210,20 @@ export class DashboardServer {
 
   broadcast(snapshot: readonly SessionState[]): void {
     this.lastSnapshot = snapshot
-    this.lastPanel = (this.panelMapper ?? emptyPanelMapper)(snapshot)
-    pushTo(this.clients, snapshot)
-    pushTo(this.panelClients, this.lastPanel)
+    this.panels.clear()
+    this.panelFor(null)
+    this.clients.publish(() => snapshot)
+    this.panelClients.publish((locale) => this.panelFor(locale))
+  }
+
+  /** Maps `lastSnapshot` at most once per viewer locale between broadcasts. */
+  private panelFor(locale: ViewerLocale): PanelSnapshot {
+    const cached = this.panels.get(locale)
+    if (cached) return cached
+    const mapper = this.panelMapper ?? emptyPanelMapper
+    const panel = locale === null ? mapper(this.lastSnapshot) : mapper(this.lastSnapshot, locale)
+    this.panels.set(locale, panel)
+    return panel
   }
 
   stop(): void {
@@ -194,62 +232,11 @@ export class DashboardServer {
       clearTimeout(this.retryTimer)
       this.retryTimer = null
     }
-    closeAll(this.clients)
-    closeAll(this.panelClients)
+    this.clients.closeAll()
+    this.panelClients.closeAll()
     this.server?.stop(true)
     this.server = null
   }
-
-  private streamTo(clients: Set<SseClient>, initial: unknown): Response {
-    let client: SseClient | null = null
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        client = { controller }
-        clients.add(client)
-        controller.enqueue(encodeEvent(initial))
-      },
-      cancel() {
-        if (client) clients.delete(client)
-      },
-    })
-    return new Response(stream, {
-      headers: {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache",
-        connection: "keep-alive",
-      },
-    })
-  }
-}
-
-function pushTo(clients: Set<SseClient>, payload: unknown): void {
-  const encoded = encodeEvent(payload)
-  for (const client of clients) {
-    try {
-      client.controller.enqueue(encoded)
-    } catch (error) {
-      if (error instanceof Error) {
-        clients.delete(client)
-      } else {
-        throw error
-      }
-    }
-  }
-}
-
-function closeAll(clients: Set<SseClient>): void {
-  for (const client of clients) {
-    try {
-      client.controller.close()
-    } catch (error) {
-      if (!(error instanceof Error)) throw error
-    }
-  }
-  clients.clear()
-}
-
-function encodeEvent(payload: unknown): Uint8Array {
-  return new TextEncoder().encode(`data: ${JSON.stringify(payload)}\n\n`)
 }
 
 /** Blocks DNS rebinding: only accepts requests addressed to loopback itself. */

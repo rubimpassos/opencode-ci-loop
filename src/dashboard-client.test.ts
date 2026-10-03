@@ -161,6 +161,7 @@ function makeWatch(overrides: Partial<PanelWatch> = {}): PanelWatch {
     phaseKey: "done-failed",
     tone: "fail",
     phaseLabel: "✗ CI failed",
+    failed: true,
     runs: [],
     checks: [],
     failures: [],
