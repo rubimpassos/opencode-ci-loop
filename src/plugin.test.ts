@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test"
 import type { Plugin } from "@opencode-ai/plugin"
+import { createV1Host } from "./host-v1.ts"
 import type { PanelSnapshot } from "./panel-types.ts"
-import { acquireShared, CiLoopPlugin, isGitPush, releaseShared } from "./plugin.ts"
+import { CiLoopPlugin } from "./plugin.ts"
+import { acquireShared, isGitPush, releaseShared } from "./plugin-runtime.ts"
 import type { DashboardServer } from "./server.ts"
 import { type PluginConfig, PluginConfigSchema, type SessionState } from "./types.ts"
 
@@ -200,8 +202,8 @@ describe("CiLoopPlugin session titles", () => {
 
     try {
       await firePush(hooks, SID)
-      const shared = acquireShared(config, stub.client)
-      const spy = spyBroadcasts(shared.dashboard)
+      const lease = acquireShared(config, createV1Host(stub.client))
+      const spy = spyBroadcasts(lease.shared.dashboard)
 
       try {
         await fireEvent(hooks, { type: "session.updated", properties: { info: sessionInfo(SID, TITLE) } })
@@ -210,7 +212,7 @@ describe("CiLoopPlugin session titles", () => {
 
         expect(spy.count).toBe(1)
       } finally {
-        releaseShared(config.dashboard.port)
+        releaseShared(lease)
       }
     } finally {
       await hooks.dispose?.()

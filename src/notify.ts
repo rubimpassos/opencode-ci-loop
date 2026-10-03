@@ -1,10 +1,11 @@
+import type { CiLoopHost } from "./host-port.ts"
 import { CATALOGS, type Locale, resolveLocale } from "./i18n.ts"
 import { filterUnseen, reviewKey, reviewUpdateToast } from "./notify-review.ts"
 import { watchKey } from "./registry.ts"
 import { isReportClean, prReadiness, renderPromptReport, sourceLabel, summarizeRuns } from "./render.ts"
 import { renderMidCiReviewUpdate, renderPostCiReviewUpdate, renderReviewEnded } from "./render-review.ts"
 import { unresolvedCount } from "./review.ts"
-import { type OpencodeClient, resolveSessionContext, type SessionModel } from "./session-context.ts"
+import { resolveSessionContext } from "./session-context.ts"
 import {
   assertNever,
   type MidCiReviewUpdate,
@@ -17,7 +18,7 @@ import {
 
 /** Everything a notification needs besides the event itself; assembled per call by plugin.ts. */
 export type NotifyContext = {
-  readonly client: OpencodeClient
+  readonly host: CiLoopHost
   readonly notifications: Set<string>
   readonly locales: Map<SessionId, Locale>
   readonly config: PluginConfig
@@ -39,21 +40,7 @@ async function toast(
   signal?: AbortSignal,
 ): Promise<void> {
   if (signal?.aborted) return
-  await ctx.client.tui.showToast({ body: { title: "CI Loop", message, variant } })
-}
-
-async function inject(
-  ctx: NotifyContext,
-  sessionID: SessionId,
-  content: { readonly model?: SessionModel; readonly text: string },
-): Promise<void> {
-  await ctx.client.session.prompt({
-    path: { id: sessionID },
-    body: {
-      ...(content.model && { model: content.model }),
-      parts: [{ type: "text", text: content.text }],
-    },
-  })
+  await ctx.host.toast?.({ title: "CI Loop", message, variant }, signal)
 }
 
 export async function notifyPhase(
@@ -116,12 +103,16 @@ async function notifyCiPhase(
       }
       await toast(ctx, `${message} · ${context}`, clean ? "success" : "error", signal)
       if (signal?.aborted) return
-      const session = await resolveSessionContext(ctx.client, sessionID, ctx.config.language, ctx.locales)
+      const session = await resolveSessionContext(ctx, sessionID, signal)
       if (signal?.aborted) return
-      await inject(ctx, sessionID, {
-        ...(session.model && { model: session.model }),
-        text: renderPromptReport(phase.report, session.locale, ctx.config.review.agentMarker),
-      })
+      await ctx.host.prompt(
+        sessionID,
+        {
+          ...(session.model && { model: session.model }),
+          text: renderPromptReport(phase.report, session.locale, ctx.config.review.agentMarker),
+        },
+        signal,
+      )
       return
     }
     default:
@@ -147,14 +138,18 @@ async function notifyReviewDelta(
   const unseen = filterUnseen(event.delta, base, ctx.notifications)
   if (unseen.fingerprints.length === 0) return
   for (const fingerprint of unseen.fingerprints) ctx.notifications.add(fingerprint)
-  const session = await resolveSessionContext(ctx.client, event.sessionID, ctx.config.language, ctx.locales)
+  const session = await resolveSessionContext(ctx, event.sessionID, signal)
   if (signal?.aborted) return
   await toast(ctx, reviewUpdateToast(CATALOGS[session.locale], unseen.delta, event.prNumber), "info", signal)
   if (signal?.aborted) return
-  await inject(ctx, event.sessionID, {
-    ...(session.model && { model: session.model }),
-    text: event.render(unseen.delta, session.locale),
-  })
+  await ctx.host.prompt(
+    event.sessionID,
+    {
+      ...(session.model && { model: session.model }),
+      text: event.render(unseen.delta, session.locale),
+    },
+    signal,
+  )
 }
 
 /** Post-CI review update (message C). */
@@ -221,7 +216,7 @@ async function notifyReviewEnded(
   const messages = CATALOGS[cachedLocale(ctx, sessionID)]
   switch (phase.reason) {
     case "ready": {
-      const session = await resolveSessionContext(ctx.client, sessionID, ctx.config.language, ctx.locales)
+      const session = await resolveSessionContext(ctx, sessionID, signal)
       if (signal?.aborted) return
       await toast(ctx, CATALOGS[session.locale].toastAllResolved(prNumber), "success", signal)
       if (signal?.aborted) return
@@ -230,7 +225,7 @@ async function notifyReviewEnded(
         { repo: watch.repo, prNumber },
         session.locale,
       )
-      await inject(ctx, sessionID, { ...(session.model && { model: session.model }), text })
+      await ctx.host.prompt(sessionID, { ...(session.model && { model: session.model }), text }, signal)
       return
     }
     case "merged":

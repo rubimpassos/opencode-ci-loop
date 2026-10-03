@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test"
+import { createV1Host, type OpencodeClient } from "./host-v1.ts"
 import type { Locale } from "./i18n.ts"
 import { clearSessionNotifications, type NotifyContext, notifyPhase, notifyReviewUpdate } from "./notify.ts"
 import { resolveSessionContext } from "./session-context.ts"
@@ -19,7 +20,7 @@ import {
   type WorkflowRun,
 } from "./types.ts"
 
-type Client = NotifyContext["client"]
+type Client = OpencodeClient
 
 const SID = "ses_notify" as SessionId
 const SHA = "abc12345def0" as CommitSha
@@ -72,7 +73,7 @@ function recordingClient(initial: readonly FakeMessage[] = []): {
 
 function makeCtx(client: Client, language = "auto"): NotifyContext {
   return {
-    client,
+    host: createV1Host(client),
     notifications: new Set(),
     locales: new Map<SessionId, Locale>(),
     config: PluginConfigSchema.parse({ language }),
@@ -219,13 +220,13 @@ describe("resolveSessionContext", () => {
       { info: { role: "assistant", providerID: "openai", modelID: "gpt-5.6" } },
       { info: { role: "user" } },
     ])
-    const result = await resolveSessionContext(client, SID, "auto", new Map())
+    const result = await resolveSessionContext(makeCtx(client), SID)
     expect(result.model).toEqual({ providerID: "openai", modelID: "gpt-5.6" })
   })
 
   it("omits the model when there is no assistant message yet", async () => {
     const { client } = recordingClient([{ info: { role: "user" } }])
-    const result = await resolveSessionContext(client, SID, "auto", new Map())
+    const result = await resolveSessionContext(makeCtx(client), SID)
     expect(result.model).toBeUndefined()
   })
 
@@ -238,7 +239,7 @@ describe("resolveSessionContext", () => {
       },
     } as unknown as Client
     const locales = new Map<SessionId, Locale>()
-    const result = await resolveSessionContext(client, SID, "auto", locales)
+    const result = await resolveSessionContext({ ...makeCtx(client), locales }, SID)
     expect(result.model).toBeUndefined()
     expect(result.locale).toBe("en")
     expect(locales.size).toBe(0)
@@ -249,7 +250,7 @@ describe("resolveSessionContext", () => {
       { info: { role: "user" }, parts: [{ type: "text", text: "você pode corrigir isso por favor" }] },
     ])
     const locales = new Map<SessionId, Locale>()
-    const result = await resolveSessionContext(client, SID, "auto", locales)
+    const result = await resolveSessionContext({ ...makeCtx(client), locales }, SID)
     expect(result.locale).toBe("pt-BR")
     expect(locales.get(SID)).toBe("pt-BR")
   })
@@ -259,7 +260,7 @@ describe("resolveSessionContext", () => {
       { info: { role: "user" }, parts: [{ type: "text", text: "você pode corrigir isso por favor" }] },
     ])
     const locales = new Map<SessionId, Locale>()
-    const result = await resolveSessionContext(client, SID, "en", locales)
+    const result = await resolveSessionContext({ ...makeCtx(client, "en"), locales }, SID)
     expect(result.locale).toBe("en")
     expect(locales.size).toBe(0)
   })
