@@ -42,7 +42,9 @@ const results = []
 let stack
 progress(`Scratch: ${scratch}`)
 try {
-  stack = await startStack({ root, scratch, artifacts, processes, signal: controller.signal })
+  // E2E_PACKAGE_ROOT runs the stack against an unpacked `npm pack` tarball instead of this checkout.
+  const packageRoot = process.env.E2E_PACKAGE_ROOT ? resolve(process.env.E2E_PACKAGE_ROOT) : root
+  stack = await startStack({ root, packageRoot, scratch, artifacts, processes, signal: controller.signal })
   const seeded = await seed(stack, artifacts)
   for (const name of selected) {
     progress(`Scenario: ${name}`)

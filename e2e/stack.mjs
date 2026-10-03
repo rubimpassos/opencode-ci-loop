@@ -15,6 +15,7 @@ const ProviderRequests = z.array(
 /** The caller owns scratch/process cleanup even when startup fails halfway through. */
 export async function startStack(options) {
   const { scratch, root, artifacts, processes, signal } = options
+  const packageRoot = options.packageRoot ?? root
   const config = configure(scratch, root)
   const { env, dirs, fixture } = config
   const record = (entry) =>
@@ -56,7 +57,7 @@ export async function startStack(options) {
   const ciPort = await freePort()
   assert.notEqual(ciPort, 4517)
   env.OPENCHAMBER_CI_LOOP_PORT = String(ciPort)
-  writeConfig(config, root, providerPort)
+  writeConfig(config, packageRoot, providerPort)
   const codePort = await freePort()
   const codeUrl = `http://127.0.0.1:${codePort}`
   const ciUrl = `http://127.0.0.1:${ciPort}`
@@ -117,7 +118,7 @@ export async function startStack(options) {
     `# Netscape HTTP Cookie File\n127.0.0.1\tFALSE\t/\tFALSE\t0\t${cookie.slice(0, separator)}\t${cookie.slice(separator + 1)}\n`,
     { mode: 0o600 },
   )
-  await api("/api/guests", { method: "POST", body: { path: root }, status: 201 })
+  await api("/api/guests", { method: "POST", body: { path: packageRoot }, status: 201 })
   const grant = (granted) => api("/api/guests/ci-loop/capabilities", { method: "PUT", body: { granted } })
   await grant(["loopback"])
   const guestToken = async () => {
@@ -151,7 +152,7 @@ export async function startStack(options) {
           )
         : [],
   }
-  progress(`Stack ready: OpenChamber ${ocUrl}, OpenCode ${codeUrl}, CI ${ciUrl}`)
+  progress(`Stack ready: OpenChamber ${ocUrl}, OpenCode ${codeUrl}, CI ${ciUrl}; package ${packageRoot}`)
   return { ...stack, ...sessionClient(stack) }
 }
 
