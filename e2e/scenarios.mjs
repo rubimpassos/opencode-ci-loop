@@ -46,20 +46,14 @@ export async function S2(stack, seeded) {
   assert(frame.sessions.length >= 2)
   checks.push("scoped URL token receives SSE data frame")
 
-  // Given the failing session's enabled watch.
+  // Given a disposable session (toggling off drops a session's watches, so the seeded failure stays intact).
+  const target = await stack.createSession("E2E toggle target")
   // When a cookie-authenticated write passes through the host.
-  try {
-    await stack.api(`${proxy}/sessions/${seeded.failed}/enabled`, {
-      method: "POST",
-      body: { enabled: false },
-    })
-    // Then the upstream state, not merely the proxy response, has changed.
-    const disabled = Session.parse(await stack.ci(`/sessions/${seeded.failed}`))
-    assert.equal(disabled.enabled, false)
-    checks.push("cookie POST changes raw plugin enabled state")
-  } finally {
-    await stack.api(`${proxy}/sessions/${seeded.failed}/enabled`, { method: "POST", body: { enabled: true } })
-  }
+  await stack.api(`${proxy}/sessions/${target}/enabled`, { method: "POST", body: { enabled: false } })
+  // Then the upstream state, not merely the proxy response, has changed.
+  const disabled = Session.parse(await stack.ci(`/sessions/${target}`))
+  assert.equal(disabled.enabled, false)
+  checks.push("cookie POST changes raw plugin enabled state")
 
   // Given an installed guest whose loopback approval is revoked.
   await stack.grant([])
