@@ -118,6 +118,28 @@ Or with options:
 }
 ```
 
+### OpenCode V2
+
+V2 uses a separate entrypoint (tested with OpenCode **2.0.22**). After installing the package locally,
+point `plugins` at its **absolute `v2` directory** (which loads `v2.ts`); V1 stays unchanged.
+OpenCode 2.0.22 rejects configured file paths, so do not point it directly at `v2.ts`.
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [{
+    "package": "/absolute/path/to/opencode-ci-loop/v2",
+    "options": { "dashboard": { "port": 4517 } }
+  }]
+}
+```
+
+V2 admits reports as queued user prompts, not synthetic messages: a report never interrupts an active
+turn, it runs after it (or right away when the session is idle). `ci_watch` remains a directly callable tool.
+V2 has no V1 TUI toast API; use the dashboard for progress. Diagnostics stay off the terminal in a bounded
+`ci-loop-v2.log` under OpenCode's state
+directory (`$XDG_STATE_HOME/opencode`, or `~/.local/state/opencode`).
+
 | Option | Default | Description |
 |---|---|---|
 | `autoWatch` | `true` | Initial loop state for each session |
