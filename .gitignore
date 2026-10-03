@@ -5,6 +5,7 @@ node_modules
 out
 dist
 *.tgz
+!vendor/openchamber-sdk-loopback.tgz
 
 # code coverage
 coverage

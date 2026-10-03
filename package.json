@@ -1,22 +1,38 @@
 {
   "name": "opencode-ci-loop",
   "version": "0.9.2",
-  "description": "opencode plugin: CI validation loop — watches GitHub Actions after a push, injects results into the session, with per-session toggle and a live SSE dashboard",
+  "description": "opencode plugin: CI validation loop \u2014 watches GitHub Actions after a push, injects results into the session, with per-session toggle and a live SSE dashboard",
   "module": "index.ts",
   "main": "index.ts",
   "type": "module",
   "license": "MIT",
   "repository": "github:rubimpassos/opencode-ci-loop",
-  "files": ["index.ts", "v2.ts", "v2", "src", "!src/**/*.test.ts"],
+  "files": [
+    "index.ts",
+    "v2.ts",
+    "v2",
+    "src",
+    "!src/**/*.test.ts",
+    "!src/**/*.test-support.ts",
+    "panel/index.html",
+    "panel/main.js",
+    "status/index.html",
+    "status/main.js",
+    "background/index.html",
+    "background/main.js"
+  ],
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.extension.json",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "test": "bun test",
+    "build:extension": "bun scripts/build-extension.ts",
+    "check:extension-build": "bun scripts/check-extension-build.ts",
     "check": "bun run typecheck && bun run lint && bun test"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.4",
+    "@openchamber/sdk": "file:vendor/openchamber-sdk-loopback.tgz",
     "@opencode/schema": "2.0.22",
     "@types/bun": "latest",
     "typescript": "^5.9.3"
@@ -28,5 +44,59 @@
     "@opencode-ai/plugin": "^1.18.1",
     "@opencode/plugin": "2.0.22",
     "zod": "4.1.8"
+  },
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.1.1"
+    },
+    "contributes": {
+      "panel": {
+        "id": "ci-loop",
+        "name": "CI Loop",
+        "icon": "git-merge",
+        "entry": "panel/index.html",
+        "badge": "count"
+      },
+      "background": {
+        "entry": "background/index.html",
+        "start": "automatic"
+      },
+      "statusSection": {
+        "entry": "status/index.html",
+        "title": "CI Loop",
+        "height": 112
+      },
+      "loopback": {
+        "port": 4517,
+        "env": "OPENCHAMBER_CI_LOOP_PORT",
+        "routes": [
+          {
+            "path": "/panel/state",
+            "methods": [
+              "GET"
+            ]
+          },
+          {
+            "path": "/panel/events",
+            "methods": [
+              "GET"
+            ]
+          },
+          {
+            "path": "/sessions/*",
+            "methods": [
+              "GET"
+            ]
+          },
+          {
+            "path": "/sessions/*/enabled",
+            "methods": [
+              "POST"
+            ]
+          }
+        ]
+      }
+    }
   }
 }
