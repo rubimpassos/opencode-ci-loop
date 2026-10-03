@@ -123,6 +123,24 @@ it.each([".", "child"])("resolves the pushed commit when shell workdir is %s", a
   }
 })
 
+it("starts a watch when the host-normalized shell input contains only command", async () => {
+  // Given the actual OpenCode 2.0.22 hook shape, which omits the model's description.
+  using fixture = pushFixture()
+  const event = { ...fixture.event, input: { command: "git push origin HEAD:refs/heads/feature/e2e" } }
+  const cleanup = await setupV2(fixture.ctx)
+  try {
+    // When the completed push reaches the registered hook.
+    await fixture.after(event)
+    // Then the pushed commit is watched rather than silently rejected by the input parser.
+    const response = await fetch(`http://127.0.0.1:${fixture.port}/state`)
+    expect(await response.json()).toMatchObject([
+      { sessionID: SID, watches: [{ sha: fixture.sha, branch: "feature/e2e" }] },
+    ])
+  } finally {
+    await cleanup()
+  }
+})
+
 it("preserves structured content when appending a watch notice", async () => {
   // Given a completed result carrying text, a file, metadata and structured output.
   using fixture = pushFixture()

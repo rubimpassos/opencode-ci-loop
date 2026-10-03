@@ -23,7 +23,6 @@ const ShellInputSchema = z.object({
   command: z.string(),
   workdir: z.string().optional(),
   timeout: z.number().optional(),
-  description: z.string(),
 })
 const WatchInputSchema = z.strictObject({ action: z.enum(["enable", "disable", "status"]) })
 
