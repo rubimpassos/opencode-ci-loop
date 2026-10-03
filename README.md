@@ -167,11 +167,22 @@ directory (`$XDG_STATE_HOME/opencode`, or `~/.local/state/opencode`).
 > [!TIP]
 > The `ci_watch` tool also instructs the agent to **never** poll CI manually (`sleep`, `gh pr checks`, `gh run watch`) — the result always arrives on its own.
 
-### Dashboard in OpenChamber
+### OpenChamber extension
 
-Open `http://127.0.0.1:4517` in OpenChamber's **browser/preview** panel to get the live CI panel next to the chat — per-workflow status, spinner while running, and expandable failure logs.
+This same folder is both the opencode plugin above and an [OpenChamber](https://openchamber.ai) extension — one install, two roles. In OpenChamber: **Settings → Extensions → Add**, then point it at this folder's path. It requires an OpenChamber fork at or above the version in `package.json`'s `openchamber.engines.openchamber` (currently `>=2.1.1`); this is **not** a capability of upstream OpenChamber, it needs the fork that adds the `loopback` guest contribution.
 
-The **PR** tab in OpenChamber's git area also integrates with the plugin: a per-session "CI Monitor" toggle + live status badge (the OpenChamber server proxies to the dashboard; port configurable via `OPENCHAMBER_CI_LOOP_PORT`).
+What it adds once installed:
+
+- **Rail panel** — the same live dashboard as a native OpenChamber panel, searchable and filterable like the standalone page
+- **Work Status section** — the current session's CI summary in the chat sidebar, with its own watch toggle
+- **Failure-count badge** — the rail icon shows a count of watches whose report isn't clean (not just PR-blocking ones), kept live by an automatic background frame that OpenChamber starts on its own
+- **Chat activity rows** — `[ci-loop]` reports and `ci_watch` tool calls render as structured rows in the conversation instead of raw markdown
+
+Installing it is a capability grant, not just a file copy: OpenChamber asks you to approve the extension's `loopback` capability, a server-local connection to `127.0.0.1:<port>` restricted to the exact routes the manifest declares. If the declared port, env var, or route list ever changes (e.g. after an update), OpenChamber asks for reapproval; it never silently widens an existing grant.
+
+**Port matching matters.** The plugin's `dashboard.port` (default `4517`) and OpenChamber server's `OPENCHAMBER_CI_LOOP_PORT` (same default) must agree, the extension talks to whichever port the manifest declares, overridable by that env var. Only one plugin process can own a port; if a second opencode process starts pointing at the same port, the dashboard it binds serves it, and the other is the one the extension sees as **"plugin not running"** until that port frees up or you point one of them elsewhere.
+
+**Transport**: the rail and status section use a live stream when the host supports it, and fall back to polling `/panel/state` every 5 seconds when it doesn't (relay-mediated hosts, for instance). Either way the data is the same `PanelSnapshot`, just delivered differently.
 
 ### Dashboard panel
 
@@ -195,8 +206,8 @@ All routes require a loopback `Host` (barrier against DNS rebinding).
 | `/events` | GET | SSE with live snapshots |
 | `/sessions/:id` | GET | State of one session (pure read; never-seen sessions inherit the `autoWatch` default) |
 | `/sessions/:id/enabled` | POST | Toggles the session's loop — body `{ "enabled": boolean }`, returns the new `SessionState` |
-| `/panel/state` | GET | **Panel-internal.** `PanelSnapshot` — the localized, fully-resolved view model the page renders |
-| `/panel/events` | GET | **Panel-internal.** SSE with live `PanelSnapshot` frames |
+| `/panel/state?locale=en\|pt-BR` | GET | **Panel-internal.** `PanelSnapshot` — the localized, fully-resolved view model the page renders. `locale` overrides the per-session default; a `watch` entry includes a `failed` boolean (report not clean) |
+| `/panel/events?locale=en\|pt-BR` | GET | **Panel-internal.** SSE with live `PanelSnapshot` frames, same `locale` override |
 
 `/state`, `/events`, `/sessions/:id` and `POST /sessions/:id/enabled` are **unchanged** — same `SessionState` payload, same shape, same semantics. The OpenChamber integration is unaffected.
 
@@ -206,7 +217,19 @@ All routes require a loopback `Host` (barrier against DNS rebinding).
 
 ```bash
 bun install
-bun run check   # typecheck + biome + tests
+bun run check                   # typecheck + biome + tests
+bun run build:extension         # bundles panel/status/background into their index.html + main.js
+bun run check:extension-build   # verifies the bundled output matches current source
+```
+
+The OpenChamber extension entries (`panel/`, `status/`, `background/`) are built against
+`@openchamber/sdk`, vendored under `vendor/openchamber-sdk-loopback.tgz` because the loopback host
+API it uses isn't in a published SDK release yet (see `vendor/README.md`). To refresh it against a
+newer OpenChamber fork checkout:
+
+```bash
+bun scripts/sync-openchamber-sdk.ts <path to openchamber checkout>
+bun install
 ```
 
 ## Architecture
@@ -244,6 +267,14 @@ src/dashboard.ts          # panel HTML shell composing styles + script + control
 src/dashboard-styles.ts   # panel CSS (dark GitHub-ish; tone → color)
 src/dashboard-script.ts   # client renderer: escapes and paints the snapshot, SSE reconnect
 src/dashboard-controls.ts # client search box + phase/watch filter chips
+
+# OpenChamber extension
+src/extension/binding.ts  # typed SDK loopback client: live stream, 5s poll fallback, session calls
+src/extension/schemas.ts  # parses PanelSnapshot/session-control payloads, flags stale/old-plugin data
+src/extension/badge.ts    # background-frame badge writer (failed-watch count)
+src/extension/panel/      # rail panel view (mirrors dashboard-script.ts, as SDK-safe templates)
+src/extension/status/     # Work Status section view + authoritative watch toggle
+panel/, status/, background/  # built entries (index.html + main.js) consumed by the OpenChamber manifest
 ```
 
 No runtime dependencies beyond `@opencode-ai/plugin`. Strictly typed, tested with `bun test`.
