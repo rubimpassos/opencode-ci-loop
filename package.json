@@ -96,7 +96,26 @@
             ]
           }
         ]
-      }
+      },
+      "tools": [
+        {
+          "match": "ci_watch",
+          "name": "CI watch",
+          "icon": "pulse",
+          "title": "CI watch",
+          "subtitle": "{input.action}",
+          "output": "text"
+        }
+      ],
+      "messages": [
+        {
+          "match": "^\\[ci-loop\\] (?<heading>[^\\r\\n]+)",
+          "name": "CI Loop",
+          "title": "{match.heading}",
+          "tone": "info",
+          "body": "markdown"
+        }
+      ]
     }
   }
 }
