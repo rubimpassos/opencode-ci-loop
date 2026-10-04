@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { createV1Host, type OpencodeClient } from "./host-v1.ts"
+import type { CiLoopHost, HostPrompt, HostToast, SessionModel } from "./host-port.ts"
 import type { Locale } from "./i18n.ts"
 import { clearSessionNotifications, type NotifyContext, notifyPhase, notifyReviewUpdate } from "./notify.ts"
 import { resolveSessionContext } from "./session-context.ts"
@@ -20,48 +20,55 @@ import {
   type WorkflowRun,
 } from "./types.ts"
 
-type Client = OpencodeClient
-
 const SID = "ses_notify" as SessionId
 const SHA = "abc12345def0" as CommitSha
 
-type FakeMessage = { info: Record<string, unknown>; parts?: ReadonlyArray<Record<string, unknown>> }
-type PromptBody = {
-  model?: { providerID: string; modelID: string }
-  parts: ReadonlyArray<{ type: string; text: string }>
-}
-type ToastBody = { title: string; message: string; variant: string }
+type FakeMessage = { info: Record<string, unknown>; parts?: ReadonlyArray<{ type: string; text: string }> }
+type PromptBody = { model?: SessionModel; parts: ReadonlyArray<{ type: string; text: string }> }
 
-function recordingClient(initial: readonly FakeMessage[] = []): {
-  client: Client
+/** The host's view of a conversation: newest assistant model and newest user text. */
+function contextOf(messages: readonly FakeMessage[]): { model?: SessionModel; lastUserText: string } {
+  const assistant = messages.findLast((message) => message.info["role"] === "assistant")
+  const user = messages.findLast((message) => message.info["role"] === "user")
+  const providerID = assistant?.info["providerID"]
+  const modelID = assistant?.info["modelID"]
+  const lastUserText = (user?.parts ?? []).map((part) => part.text).join("\n")
+  return typeof providerID === "string" && typeof modelID === "string"
+    ? { model: { providerID, modelID }, lastUserText }
+    : { lastUserText }
+}
+
+function recordingHost(initial: readonly FakeMessage[] = []): {
+  host: CiLoopHost
   prompts: PromptBody[]
-  toasts: ToastBody[]
+  toasts: HostToast[]
   calls: { messages: number }
   setMessages: (next: readonly FakeMessage[]) => void
 } {
   let messages = initial
   const prompts: PromptBody[] = []
-  const toasts: ToastBody[] = []
+  const toasts: HostToast[] = []
   const calls = { messages: 0 }
-  const client = {
-    tui: {
-      showToast: async (opts: { body: ToastBody }) => {
-        toasts.push(opts.body)
-      },
+  const host: CiLoopHost = {
+    sessionScope: "global",
+    getSessionTitle: async () => undefined,
+    readSessionContext: async () => {
+      calls.messages += 1
+      return contextOf(messages)
     },
-    session: {
-      messages: async () => {
-        calls.messages += 1
-        return { data: messages.map((message) => ({ parts: [], ...message })) }
-      },
-      prompt: async (opts: { body: PromptBody }) => {
-        prompts.push(opts.body)
-        return { data: {} }
-      },
+    prompt: async (_sessionID, content: HostPrompt) => {
+      prompts.push({
+        ...(content.model && { model: content.model }),
+        parts: [{ type: "text", text: content.text }],
+      })
     },
-  } as unknown as Client
+    toast: async (content) => {
+      toasts.push(content)
+    },
+    log: async () => {},
+  }
   return {
-    client,
+    host,
     prompts,
     toasts,
     calls,
@@ -71,9 +78,9 @@ function recordingClient(initial: readonly FakeMessage[] = []): {
   }
 }
 
-function makeCtx(client: Client, language = "auto"): NotifyContext {
+function makeCtx(host: CiLoopHost, language = "auto"): NotifyContext {
   return {
-    host: createV1Host(client),
+    host,
     notifications: new Set(),
     locales: new Map<SessionId, Locale>(),
     config: PluginConfigSchema.parse({ language }),
@@ -213,54 +220,36 @@ function endedWatch(
 }
 
 describe("resolveSessionContext", () => {
-  it("returns the last assistant message's model", async () => {
-    const { client } = recordingClient([
-      { info: { role: "assistant", providerID: "anthropic", modelID: "claude-fable-5" } },
-      { info: { role: "user" } },
-      { info: { role: "assistant", providerID: "openai", modelID: "gpt-5.6" } },
-      { info: { role: "user" } },
-    ])
-    const result = await resolveSessionContext(makeCtx(client), SID)
-    expect(result.model).toEqual({ providerID: "openai", modelID: "gpt-5.6" })
-  })
-
-  it("omits the model when there is no assistant message yet", async () => {
-    const { client } = recordingClient([{ info: { role: "user" } }])
-    const result = await resolveSessionContext(makeCtx(client), SID)
-    expect(result.model).toBeUndefined()
-  })
-
   it("falls back to en without a model when the messages request fails", async () => {
-    const client = {
-      session: {
-        messages: async () => {
-          throw new Error("network down")
-        },
+    const host: CiLoopHost = {
+      ...recordingHost().host,
+      readSessionContext: async () => {
+        throw new Error("network down")
       },
-    } as unknown as Client
+    }
     const locales = new Map<SessionId, Locale>()
-    const result = await resolveSessionContext({ ...makeCtx(client), locales }, SID)
+    const result = await resolveSessionContext({ ...makeCtx(host), locales }, SID)
     expect(result.model).toBeUndefined()
     expect(result.locale).toBe("en")
     expect(locales.size).toBe(0)
   })
 
   it("detects the locale from the last user message's text parts and caches it", async () => {
-    const { client } = recordingClient([
+    const { host } = recordingHost([
       { info: { role: "user" }, parts: [{ type: "text", text: "você pode corrigir isso por favor" }] },
     ])
     const locales = new Map<SessionId, Locale>()
-    const result = await resolveSessionContext({ ...makeCtx(client), locales }, SID)
+    const result = await resolveSessionContext({ ...makeCtx(host), locales }, SID)
     expect(result.locale).toBe("pt-BR")
     expect(locales.get(SID)).toBe("pt-BR")
   })
 
   it("skips detection when the config language is explicit", async () => {
-    const { client } = recordingClient([
+    const { host } = recordingHost([
       { info: { role: "user" }, parts: [{ type: "text", text: "você pode corrigir isso por favor" }] },
     ])
     const locales = new Map<SessionId, Locale>()
-    const result = await resolveSessionContext({ ...makeCtx(client, "en"), locales }, SID)
+    const result = await resolveSessionContext({ ...makeCtx(host, "en"), locales }, SID)
     expect(result.locale).toBe("en")
     expect(locales.size).toBe(0)
   })
@@ -268,9 +257,9 @@ describe("resolveSessionContext", () => {
 
 describe("notifyPhase done toast", () => {
   it("keeps the CI-only text when the branch has no PR", async () => {
-    const { client, toasts } = recordingClient()
+    const { host, toasts } = recordingHost()
 
-    await notifyPhase(makeCtx(client), "ses_ci" as SessionId, doneWatch())
+    await notifyPhase(makeCtx(host), "ses_ci" as SessionId, doneWatch())
 
     expect(toasts[0]?.message).toBe(
       "CI green (1 checks) · github.com/o/r · develop — current branch of this session",
@@ -278,9 +267,9 @@ describe("notifyPhase done toast", () => {
   })
 
   it("appends ready-to-merge status when the branch has a ready PR", async () => {
-    const { client, toasts } = recordingClient()
+    const { host, toasts } = recordingHost()
 
-    await notifyPhase(makeCtx(client), "ses_ready" as SessionId, doneWatch(makePr()))
+    await notifyPhase(makeCtx(host), "ses_ready" as SessionId, doneWatch(makePr()))
 
     expect(toasts[0]?.message).toBe(
       "CI green (1 checks) · PR #12 ready to merge · github.com/o/r · develop — current branch of this session",
@@ -288,9 +277,9 @@ describe("notifyPhase done toast", () => {
   })
 
   it("appends the blocker count when the branch PR is not ready", async () => {
-    const { client, toasts } = recordingClient()
+    const { host, toasts } = recordingHost()
 
-    await notifyPhase(makeCtx(client), "ses_blocked" as SessionId, doneWatch(makePr({ isDraft: true })))
+    await notifyPhase(makeCtx(host), "ses_blocked" as SessionId, doneWatch(makePr({ isDraft: true })))
 
     expect(toasts[0]?.message).toBe(
       "CI green (1 checks) · PR #12 blocked: 1 issue · github.com/o/r · develop — current branch of this session",
@@ -298,8 +287,8 @@ describe("notifyPhase done toast", () => {
   })
 
   it("does not dedupe equal phases from different watched branches", async () => {
-    const { client, toasts } = recordingClient()
-    const ctx = makeCtx(client)
+    const { host, toasts } = recordingHost()
+    const ctx = makeCtx(host)
     const first = makeWatch({ kind: "waiting" })
     const second = { ...first, branch: "release" } satisfies Watch
 
@@ -310,11 +299,11 @@ describe("notifyPhase done toast", () => {
   })
 
   it("does not toast or prompt after its watch generation is aborted", async () => {
-    const { client, prompts, toasts } = recordingClient()
+    const { host, prompts, toasts } = recordingHost()
     const controller = new AbortController()
     controller.abort()
 
-    await notifyPhase(makeCtx(client), "ses_stale" as SessionId, doneWatch(), controller.signal)
+    await notifyPhase(makeCtx(host), "ses_stale" as SessionId, doneWatch(), controller.signal)
 
     expect(toasts).toEqual([])
     expect(prompts).toEqual([])
@@ -323,20 +312,20 @@ describe("notifyPhase done toast", () => {
 
 describe("notifyPhase model preservation", () => {
   it("injects the CI report on the session's last-used model", async () => {
-    const { client, prompts } = recordingClient([
+    const { host, prompts } = recordingHost([
       { info: { role: "assistant", providerID: "openai", modelID: "gpt-5.6" } },
     ])
 
-    await notifyPhase(makeCtx(client), "ses_x" as SessionId, doneWatch())
+    await notifyPhase(makeCtx(host), "ses_x" as SessionId, doneWatch())
 
     expect(prompts).toHaveLength(1)
     expect(prompts[0]?.model).toEqual({ providerID: "openai", modelID: "gpt-5.6" })
   })
 
   it("omits the model (falls back to the agent default) when no assistant message exists", async () => {
-    const { client, prompts } = recordingClient()
+    const { host, prompts } = recordingHost()
 
-    await notifyPhase(makeCtx(client), "ses_y" as SessionId, doneWatch())
+    await notifyPhase(makeCtx(host), "ses_y" as SessionId, doneWatch())
 
     expect(prompts).toHaveLength(1)
     expect(prompts[0]?.model).toBeUndefined()
@@ -345,8 +334,8 @@ describe("notifyPhase model preservation", () => {
 
 describe("notifyPhase reviewing", () => {
   it("injects one batched prompt containing every unseen delta item", async () => {
-    const { client, prompts, toasts } = recordingClient()
-    const ctx = makeCtx(client)
+    const { host, prompts, toasts } = recordingHost()
+    const ctx = makeCtx(host)
     const delta = deltaWith({
       newComments: [
         commentEvent(makeComment({ databaseId: 100, author: "alice", body: "fix the null check" })),
@@ -366,8 +355,8 @@ describe("notifyPhase reviewing", () => {
   })
 
   it("is silent when every delta item was already seen", async () => {
-    const { client, prompts, toasts } = recordingClient()
-    const ctx = makeCtx(client)
+    const { host, prompts, toasts } = recordingHost()
+    const ctx = makeCtx(host)
     const delta = deltaWith({ newComments: [commentEvent(makeComment({ databaseId: 100 }))] })
 
     await notifyPhase(ctx, SID, reviewingWatch(delta))
@@ -378,8 +367,8 @@ describe("notifyPhase reviewing", () => {
   })
 
   it("renders only unseen items when the delta is partially seen", async () => {
-    const { client, prompts } = recordingClient()
-    const ctx = makeCtx(client)
+    const { host, prompts } = recordingHost()
+    const ctx = makeCtx(host)
     const seen = commentEvent(makeComment({ databaseId: 100, body: "old body one" }))
     const fresh = commentEvent(makeComment({ databaseId: 101, body: "brand new body" }))
 
@@ -393,8 +382,8 @@ describe("notifyPhase reviewing", () => {
   })
 
   it("includes the unresolved-conversation blocker computed from the snapshot", async () => {
-    const { client, prompts } = recordingClient()
-    const ctx = makeCtx(client)
+    const { host, prompts } = recordingHost()
+    const ctx = makeCtx(host)
     const snapshot = makeSnapshot({ threads: [makeThread()] })
     const delta = deltaWith({
       newComments: [commentEvent(makeComment({ databaseId: 100 }))],
@@ -407,8 +396,8 @@ describe("notifyPhase reviewing", () => {
   })
 
   it("keeps repo+PR fingerprints across watch replacement (new sha)", async () => {
-    const { client, prompts, toasts } = recordingClient()
-    const ctx = makeCtx(client)
+    const { host, prompts, toasts } = recordingHost()
+    const ctx = makeCtx(host)
     const delta = deltaWith({ newComments: [commentEvent(makeComment({ databaseId: 100 }))] })
 
     await notifyPhase(ctx, SID, reviewingWatch(delta, { sha: "aaaa1111bbbb" as CommitSha }))
@@ -421,10 +410,10 @@ describe("notifyPhase reviewing", () => {
 
 describe("notifyReviewUpdate (mid-CI)", () => {
   it("injects message A with the session model and dedupes the later reviewing phase", async () => {
-    const { client, prompts, toasts } = recordingClient([
+    const { host, prompts, toasts } = recordingHost([
       { info: { role: "assistant", providerID: "openai", modelID: "gpt-5.6" } },
     ])
-    const ctx = makeCtx(client)
+    const ctx = makeCtx(host)
     const comment = makeComment({ databaseId: 100, author: "Copilot", body: "extract this helper" })
     const delta = deltaWith({ newComments: [commentEvent(comment)] })
     const snapshot = makeSnapshot({ threads: [makeThread({ comments: [comment] })] })
@@ -457,9 +446,9 @@ describe("notifyReviewUpdate (mid-CI)", () => {
 
 describe("notifyPhase review-ended", () => {
   it("toasts and injects the final message when the watch ends ready", async () => {
-    const { client, prompts, toasts } = recordingClient()
+    const { host, prompts, toasts } = recordingHost()
 
-    await notifyPhase(makeCtx(client), SID, endedWatch("ready"))
+    await notifyPhase(makeCtx(host), SID, endedWatch("ready"))
 
     expect(toasts[0]?.message).toBe("All threads resolved — PR #12 ready to merge")
     expect(prompts).toHaveLength(1)
@@ -471,9 +460,9 @@ describe("notifyPhase review-ended", () => {
     ["closed", "PR #12 closed — review watch ended"],
     ["idle-timeout", "Review watch idle — stopped watching PR #12"],
   ] as const)("only toasts when the watch ends %s", async (reason, expected) => {
-    const { client, prompts, toasts } = recordingClient()
+    const { host, prompts, toasts } = recordingHost()
 
-    await notifyPhase(makeCtx(client), SID, endedWatch(reason))
+    await notifyPhase(makeCtx(host), SID, endedWatch(reason))
 
     expect(toasts).toHaveLength(1)
     expect(toasts[0]?.message).toBe(expected)
@@ -481,8 +470,8 @@ describe("notifyPhase review-ended", () => {
   })
 
   it("fires the end notification only once", async () => {
-    const { client, prompts, toasts } = recordingClient()
-    const ctx = makeCtx(client)
+    const { host, prompts, toasts } = recordingHost()
+    const ctx = makeCtx(host)
 
     await notifyPhase(ctx, SID, endedWatch("ready"))
     await notifyPhase(ctx, SID, endedWatch("ready"))
@@ -494,7 +483,7 @@ describe("notifyPhase review-ended", () => {
 
 describe("review toast selection", () => {
   it("uses the Copilot toast for bot-only new comments", async () => {
-    const { client, toasts } = recordingClient()
+    const { host, toasts } = recordingHost()
     const delta = deltaWith({
       newComments: [
         commentEvent(makeComment({ databaseId: 100, author: "Copilot" })),
@@ -502,24 +491,24 @@ describe("review toast selection", () => {
       ],
     })
 
-    await notifyPhase(makeCtx(client), SID, reviewingWatch(delta))
+    await notifyPhase(makeCtx(host), SID, reviewingWatch(delta))
 
     expect(toasts[0]?.message).toBe("Copilot review: 2 comments · PR #12")
   })
 
   it("uses the single-author toast for one human comment", async () => {
-    const { client, toasts } = recordingClient()
+    const { host, toasts } = recordingHost()
     const delta = deltaWith({
       newComments: [commentEvent(makeComment({ databaseId: 100, author: "alice" }))],
     })
 
-    await notifyPhase(makeCtx(client), SID, reviewingWatch(delta))
+    await notifyPhase(makeCtx(host), SID, reviewingWatch(delta))
 
     expect(toasts[0]?.message).toBe("New comment from alice · PR #12")
   })
 
   it("falls back to the generic review-update toast for mixed activity", async () => {
-    const { client, toasts } = recordingClient()
+    const { host, toasts } = recordingHost()
     const delta = deltaWith({
       newComments: [
         commentEvent(makeComment({ databaseId: 100, author: "alice" })),
@@ -527,7 +516,7 @@ describe("review toast selection", () => {
       ],
     })
 
-    await notifyPhase(makeCtx(client), SID, reviewingWatch(delta))
+    await notifyPhase(makeCtx(host), SID, reviewingWatch(delta))
 
     expect(toasts[0]?.message).toContain("Review update:")
     expect(toasts[0]?.message).toContain("PR #12")
@@ -536,8 +525,8 @@ describe("review toast selection", () => {
 
 describe("notify locale", () => {
   it("renders pt-BR when the config language is pt-BR", async () => {
-    const { client, prompts } = recordingClient()
-    const ctx = makeCtx(client, "pt-BR")
+    const { host, prompts } = recordingHost()
+    const ctx = makeCtx(host, "pt-BR")
     const delta = deltaWith({ newComments: [commentEvent(makeComment({ databaseId: 100 }))] })
 
     await notifyPhase(ctx, SID, reviewingWatch(delta))
@@ -548,10 +537,10 @@ describe("notify locale", () => {
   })
 
   it("detects pt-BR from the last user message and serves later calls from the cache", async () => {
-    const rec = recordingClient([
+    const rec = recordingHost([
       { info: { role: "user" }, parts: [{ type: "text", text: "você pode corrigir isso por favor" }] },
     ])
-    const ctx = makeCtx(rec.client)
+    const ctx = makeCtx(rec.host)
     const first = deltaWith({ newComments: [commentEvent(makeComment({ databaseId: 100 }))] })
     const second = deltaWith({ newComments: [commentEvent(makeComment({ databaseId: 101 }))] })
 

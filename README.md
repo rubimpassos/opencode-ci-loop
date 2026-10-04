@@ -9,7 +9,7 @@
 
 **CI validation loop** plugin for [opencode](https://opencode.ai) — the equivalent of Claude Code desktop's validation loop.
 
-After the agent runs `git push`, the plugin watches GitHub Actions and **injects the CI result (including failure log tails) back into the session**. Red CI becomes a fix instruction; the agent reacts without you asking. Once CI settles, it **keeps watching the PR's reviews** — Copilot's push-time review and human comments that arrive later — and injects those too. With a per-session toggle, TUI toasts, a live visual dashboard, and localized reports (English / Brazilian Portuguese).
+After the agent runs `git push`, the plugin watches GitHub Actions and **injects the CI result (including failure log tails) back into the session**. Red CI becomes a fix instruction; the agent reacts without you asking. Once CI settles, it **keeps watching the PR's reviews** — Copilot's push-time review and human comments that arrive later — and injects those too. With a per-session toggle, a live visual dashboard, an OpenChamber extension, and localized reports (English / Brazilian Portuguese).
 
 ## How it works
 
@@ -18,9 +18,8 @@ sequenceDiagram
     participant A as Agent
     participant P as Plugin
     participant GH as GitHub Actions
-    A->>P: bash: git push ✅
+    A->>P: shell: git push ✅
     P->>GH: gh run list --commit <sha> (poll)
-    Note over P: toasts: Waiting for CI… → CI: 1/2 completed
     GH-->>P: all workflows completed
     alt CI green
         P-->>A: noop report (+ PR readiness)
@@ -60,20 +59,19 @@ sequenceDiagram
 - **Batched & deduped** — one injection per poll cycle; each comment/review/state-change is fingerprinted by PR (not commit), so a new push to the same branch never re-notifies already-seen items.
 - **The agent-marker contract** — every reply the agent posts to a review thread ends with a line containing the marker (default `_🤖 via agent_`). That marker is the **only** notification filter: marked comments are treated as the agent's own and skipped, while a human commenting from the same account still comes through. Configure it via `review.agentMarker`; add more logins to skip via `review.ignoreAuthors`.
 - **When it stops** — the PR is merged or closed, a new push supersedes the watch, or `review.idleTimeoutMs` (default 1h, re-armed on every update) elapses with no new activity.
-- **Language** — review reports and toasts follow the `language` option (auto-detected or pinned to `en` / `pt-BR`); comment bodies, logins, and URLs are always shown verbatim.
+- **Language** — review reports follow the `language` option (auto-detected or pinned to `en` / `pt-BR`); comment bodies, logins, and URLs are always shown verbatim.
 
 ## Features
 
-- **Push detection** — `tool.execute.after` hook catches the agent's `git push` (ignores `--dry-run` and rejected pushes)
+- **Push detection** — an `execute.after` hook on the `shell` tool catches the agent's `git push` (ignores `--dry-run` and rejected pushes)
 - **CI watch** — polls `gh run list --commit <sha>` until all workflows complete
 - **Multi-worktree / multi-repo** — watches every branch pushed from linked worktrees or external repos in parallel, labeling the source (session branch vs. worktree vs. external repo) without dropping the session's earlier watches
 - **Context injection** — green CI becomes a noop, red CI becomes a fix instruction with the log tail of every failed run
 - **PR readiness** — with an open PR on the branch, the report says whether it can merge and lists the exact blockers
 - **Review watching** — after CI settles, keeps polling the PR's review threads and injects new Copilot / human comments, thread resolutions, and review-decision changes (even when no CI re-runs)
 - **Agent-marker filter** — the agent's own replies (tagged with a configurable marker) are the only comments filtered out, so it never notifies itself; humans on the same account still come through
-- **i18n** — reports and toasts render in English or Brazilian Portuguese, auto-detected from the session or pinned via config
+- **i18n** — reports render in English or Brazilian Portuguese, auto-detected from the session or pinned via config
 - **Per-session toggle** — `ci_watch` tool (`enable` / `disable` / `status`); tell the agent "turn off the ci loop" anytime
-- **TUI toasts** — `Waiting for CI…` → `CI: 1/2 completed` → `CI green/failed`, then review toasts (`Copilot review: 3 comments` → `All threads resolved`) — deduped per transition
 - **Live dashboard** — mini HTTP+SSE server at `http://127.0.0.1:4517` with a per-session panel
 - **Dashboard panel** — sessions labeled by their opencode title, search across titles/repos/branches/PRs, phase + watch filters, and the same PR readiness verdict the report injects (verdict + full blocker list, never a raw `mergeable` flag)
 - **Multi-project** — plugin instances across multiple worktrees share a single dashboard (per-port singleton)
@@ -86,11 +84,15 @@ sequenceDiagram
 
 ## Installation
 
+Requires OpenCode **2.x** (tested with 2.0.22). Releases from `v1.0.0` on are V2-only; the last
+OpenCode 1.x release is `v0.9.2`.
+
 In your `opencode.json`:
 
 ```json
 {
-  "plugin": ["opencode-ci-loop@git+https://github.com/rubimpassos/opencode-ci-loop.git"]
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["opencode-ci-loop@git+https://github.com/rubimpassos/opencode-ci-loop.git#v1.0.0"]
 }
 ```
 
@@ -98,8 +100,10 @@ Or with options:
 
 ```json
 {
-  "plugin": [
-    ["opencode-ci-loop@git+https://github.com/rubimpassos/opencode-ci-loop.git", {
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [{
+    "package": "opencode-ci-loop@git+https://github.com/rubimpassos/opencode-ci-loop.git#v1.0.0",
+    "options": {
       "autoWatch": true,
       "pollIntervalMs": 15000,
       "timeoutMs": 1800000,
@@ -113,30 +117,17 @@ Or with options:
         "agentMarker": "_🤖 via agent_",
         "ignoreAuthors": []
       }
-    }]
-  ]
-}
-```
-
-### OpenCode V2
-
-V2 uses a separate entrypoint (tested with OpenCode **2.0.22**). After installing the package locally,
-point `plugins` at its **absolute `v2` directory** (which loads `v2.ts`); V1 stays unchanged.
-OpenCode 2.0.22 rejects configured file paths, so do not point it directly at `v2.ts`.
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": [{
-    "package": "/absolute/path/to/opencode-ci-loop/v2",
-    "options": { "dashboard": { "port": 4517 } }
+    }
   }]
 }
 ```
 
+A local checkout works too: point `package` at the repository's absolute directory (OpenCode 2.0.22
+rejects paths to a single `.ts` file).
+
 V2 admits reports as queued user prompts, not synthetic messages: a report never interrupts an active
-turn, it runs after it (or right away when the session is idle). `ci_watch` remains a directly callable tool.
-V2 has no V1 TUI toast API; use the dashboard for progress. Diagnostics stay off the terminal in a bounded
+turn, it runs after it (or right away when the session is idle). `ci_watch` is a directly callable tool.
+OpenCode 2 has no plugin toast API; use the dashboard or the OpenChamber extension for progress. Diagnostics stay off the terminal in a bounded
 `ci-loop-v2.log` under OpenCode's state
 directory (`$XDG_STATE_HOME/opencode`, or `~/.local/state/opencode`).
 
@@ -150,7 +141,7 @@ directory (`$XDG_STATE_HOME/opencode`, or `~/.local/state/opencode`).
 | `dashboard.enabled` | `true` | Enables the visual panel server |
 | `dashboard.host` | `127.0.0.1` | Panel host (keep it on loopback) |
 | `dashboard.port` | `4517` | Panel port |
-| `language` | `"auto"` | Language for reports, toasts **and the dashboard panel** (chrome, phase labels, PR blockers); `"auto"` detects it from the session's messages. Supported: `en`, `pt-BR` |
+| `language` | `"auto"` | Language for reports **and the dashboard panel** (chrome, phase labels, PR blockers); `"auto"` detects it from the session's messages. Supported: `en`, `pt-BR` |
 | `review.enabled` | `true` | Watch PR review comments after CI settles |
 | `review.pollIntervalMs` | `30000` | Review-watch polling interval (min 5000) |
 | `review.idleTimeoutMs` | `3600000` (1h) | Stop watching after this long with no new review activity (re-armed on every update; min 60000) |
@@ -160,7 +151,7 @@ directory (`$XDG_STATE_HOME/opencode`, or `~/.local/state/opencode`).
 ## Usage
 
 1. Ask the agent to commit and push — the loop kicks in on its own
-2. Follow along via toasts or the dashboard (`http://127.0.0.1:4517`)
+2. Follow along in the dashboard (`http://127.0.0.1:4517`) or the OpenChamber extension
 3. CI failed? The agent receives the report with logs and fixes it without you asking
 4. "turn off the ci watch for this session" → the agent calls `ci_watch(action=disable)`
 
@@ -250,7 +241,7 @@ src/review.ts             # pure review diff engine + review-cycle evaluator
 # reports and notifications
 src/render.ts             # markdown CI report + summaries + prReadiness + externalChecks
 src/render-review.ts      # markdown review update messages (mid-CI, post-CI, final)
-src/notify.ts             # toasts, prompt injection, fingerprint dedupe, locale resolution
+src/notify.ts             # prompt injection, fingerprint dedupe, locale resolution
 src/notify-review.ts      # review fingerprints (keyed by PR) + unseen-delta filtering
 
 # i18n
@@ -277,7 +268,7 @@ src/extension/status/     # Work Status section view + authoritative watch toggl
 panel/, status/, background/  # built entries (index.html + main.js) consumed by the OpenChamber manifest
 ```
 
-No runtime dependencies beyond `@opencode-ai/plugin`. Strictly typed, tested with `bun test`.
+Runtime dependencies: `@opencode/plugin` and `zod`. Strictly typed, tested with `bun test`.
 
 ## License
 

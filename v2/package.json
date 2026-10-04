@@ -1,6 +1,0 @@
-{
-  "name": "opencode-ci-loop-v2",
-  "type": "module",
-  "main": "./index.ts",
-  "exports": { ".": "./index.ts" }
-}

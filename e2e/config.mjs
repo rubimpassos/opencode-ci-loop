@@ -81,7 +81,7 @@ export function writeConfig(stack, root, providerPort) {
         shell: "/bin/sh",
         plugins: [
           {
-            package: join(root, "v2"),
+            package: root,
             options: {
               autoWatch: true,
               initialDelayMs: 0,

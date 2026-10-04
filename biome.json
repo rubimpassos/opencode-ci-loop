@@ -3,8 +3,6 @@
   "files": {
     "includes": [
       "index.ts",
-      "v2.ts",
-      "v2/**/*.ts",
       "src/**/*.ts",
       "scripts/**/*.ts",
       "e2e/**",
